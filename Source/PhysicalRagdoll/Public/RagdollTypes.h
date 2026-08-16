@@ -124,6 +124,13 @@ struct PHYSICALRAGDOLL_API FRagdollBoneGroup
 	/** Motor drive settings holding the group toward its animated pose */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
 	FPhysicalAnimationData PhysicalAnimData;
+
+	/**
+	 * Physical animation profile authored in the physics asset, driving this group in place of PhysicalAnimData.
+	 * Optional. Bodies the profile does not name are left undriven.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(GetOptions="GetPhysicalAnimationProfileOptions"))
+	FName PhysicalAnimationProfile = NAME_None;
 };
 
 /**
@@ -182,6 +189,13 @@ struct PHYSICALRAGDOLL_API FRagdollPhysicalProfile
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", ClampMin="0", UIMax="12"))
 	float BoneBlendRate = 7.f;
+
+	/**
+	 * Constraint profile authored in the physics asset, applied to every joint while this profile is active.
+	 * Optional. Reverts to URagdollComponent::DefaultConstraintProfile when the profile ends.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(GetOptions="GetConstraintProfileOptions"))
+	FName ConstraintProfile = NAME_None;
 };
 
 /**
@@ -697,6 +711,20 @@ struct PHYSICALRAGDOLL_API FRagdollSettings
 	/** Motor drive settings for simulated bodies */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll)
 	FPhysicalAnimationData PhysicalAnimData;
+
+	/**
+	 * Physical animation profile authored in the physics asset, driving the simulated bodies in place of
+	 * PhysicalAnimData. Optional. The motors still decay to zero, so this shapes how the body gives up its pose.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll, meta=(GetOptions="GetPhysicalAnimationProfileOptions"))
+	FName PhysicalAnimationProfile = NAME_None;
+
+	/**
+	 * Constraint profile authored in the physics asset, applied to every joint while ragdolling.
+	 * Optional, and the usual place to widen joint limits or drop drives that only suit a live character.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll, meta=(GetOptions="GetConstraintProfileOptions"))
+	FName ConstraintProfile = NAME_None;
 
 	/** Impulse strength applied on ragdoll start */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll, meta=(UIMin="0"))

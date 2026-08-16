@@ -11,6 +11,7 @@
 
 class ACharacter;
 class UPhysicalAnimationComponent;
+class UPhysicsAsset;
 class USkeletalMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRagdollStateChanged, ERagdollState, OldState, ERagdollState, NewState);
@@ -116,6 +117,22 @@ public:
 	/** Collision profile restored when ragdoll ends. Empty = restore whatever was active beforehand. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Collision", meta=(GetOptions="Engine.KismetSystemLibrary.GetCollisionProfileNames"))
 	FName DefaultCollisionProfile = NAME_None;
+
+	/**
+	 * Constraint profile restored once a state that applied one ends. Empty = the physics asset's defaults.
+	 * @see FRagdollPhysicalProfile::ConstraintProfile, FRagdollSettings::ConstraintProfile
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Constraints", meta=(GetOptions="GetConstraintProfileOptions"))
+	FName DefaultConstraintProfile = NAME_None;
+
+#if WITH_EDITORONLY_DATA
+	/**
+	 * Physics asset the profile name dropdowns list from, when it cannot be resolved from the owner's
+	 * skeletal mesh. Editor only, and unused at runtime.
+	 */
+	UPROPERTY(EditAnywhere, Category="Ragdoll|Constraints")
+	TSoftObjectPtr<UPhysicsAsset> ProfileSourcePhysicsAsset;
+#endif
 
 	/** Current recovery blend alpha (0 = ragdoll pose, 1 = default pose) */
 	UPROPERTY(BlueprintReadOnly, Transient, Category="Ragdoll|Recovery")
@@ -320,6 +337,17 @@ public:
 	/** Draw the bias reaching AddPhysicalBias. Console command: p.Ragdoll.DebugMotion */
 	void DrawMotionDebug() const;
 
+#if WITH_EDITOR
+	/** Physics asset the profile dropdowns list from, resolved from the owner or, in the Blueprint editor, from the class default */
+	const UPhysicsAsset* GetEditorPhysicsAsset() const;
+
+	UFUNCTION()
+	TArray<FString> GetPhysicalAnimationProfileOptions() const;
+
+	UFUNCTION()
+	TArray<FString> GetConstraintProfileOptions() const;
+#endif
+
 protected:
 	void SetState(ERagdollState NewState);
 	void CacheReferences();
@@ -369,6 +397,15 @@ protected:
 	// Shared helpers
 	void ApplySimulationCollisionProfile();
 	void RestoreCollisionProfile();
+	void ApplyConstraintProfile(FName ProfileName);
+	void RestoreConstraintProfile();
+
+	/** Drive settings a physics asset profile holds for a bone, or null when the bone has no body or the profile is not on it */
+	const FPhysicalAnimationData* FindPhysicalAnimationProfileData(FName BoneName, FName ProfileName) const;
+
+	/** Applying a profile the asset does not define is a silent no-op, leaving those bodies with no motor */
+	void WarnIfPhysicalAnimationProfileMissing(FName BoneName, FName ProfileName) const;
+
 	void EnsurePhysicsCollision();
 	void RestoreCollisionEnabled();
 	void WarnIfGroupUnanchored(const FRagdollBoneGroup& Group) const;
@@ -460,6 +497,9 @@ protected:
 
 	/** Whether we changed the collision profile on the mesh */
 	bool bCollisionProfileChanged = false;
+
+	/** Whether we changed the constraint profile on the physics asset */
+	bool bConstraintProfileChanged = false;
 
 	UPROPERTY(Transient)
 	FName OriginalCollisionProfileName = NAME_None;

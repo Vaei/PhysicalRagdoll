@@ -18,9 +18,17 @@
 #include "Engine/World.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/SkeletalBodySetup.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+
+#if WITH_EDITOR
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
+#endif
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RagdollComponent)
 
@@ -723,6 +731,134 @@ void URagdollComponent::DebugRagdollDeath(float ImpulseScaleXY, float ImpulseSca
 #endif
 }
 
+#if WITH_EDITOR
+namespace Ragdoll
+{
+	static const USkeletalMeshComponent* FindMeshOnActor(const AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return nullptr;
+		}
+
+		if (const ACharacter* Character = Cast<ACharacter>(Actor))
+		{
+			if (const USkeletalMeshComponent* CharacterMesh = Character->GetMesh())
+			{
+				return CharacterMesh;
+			}
+		}
+
+		return Actor->FindComponentByClass<USkeletalMeshComponent>();
+	}
+
+	/** Blueprint-added components live on the construction script rather than on the class default */
+	static const USkeletalMeshComponent* FindMeshOnConstructionScript(const UClass* Class)
+	{
+		for (const UClass* Current = Class; Current; Current = Current->GetSuperClass())
+		{
+			const UBlueprintGeneratedClass* BPClass = Cast<UBlueprintGeneratedClass>(Current);
+			const USimpleConstructionScript* SCS = BPClass ? BPClass->SimpleConstructionScript : nullptr;
+			if (!SCS)
+			{
+				continue;
+			}
+
+			for (const USCS_Node* Node : SCS->GetAllNodes())
+			{
+				if (const USkeletalMeshComponent* Template = Node ? Cast<USkeletalMeshComponent>(Node->ComponentTemplate) : nullptr)
+				{
+					return Template;
+				}
+			}
+		}
+
+		return nullptr;
+	}
+}
+
+const UPhysicsAsset* URagdollComponent::GetEditorPhysicsAsset() const
+{
+	if (const UPhysicsAsset* SourceAsset = ProfileSourcePhysicsAsset.LoadSynchronous())
+	{
+		return SourceAsset;
+	}
+
+	const USkeletalMeshComponent* MeshComp = Mesh;
+
+	if (!MeshComp)
+	{
+		MeshComp = Ragdoll::FindMeshOnActor(GetOwner());
+	}
+
+	if (!MeshComp)
+	{
+		// A component template is outered to the generated class rather than to an actor
+		const UClass* OwnerClass = GetTypedOuter<UClass>();
+		if (!OwnerClass)
+		{
+			if (const UBlueprint* Blueprint = GetTypedOuter<UBlueprint>())
+			{
+				OwnerClass = Blueprint->GeneratedClass;
+			}
+		}
+
+		if (OwnerClass)
+		{
+			MeshComp = Ragdoll::FindMeshOnActor(Cast<AActor>(OwnerClass->GetDefaultObject()));
+
+			if (!MeshComp)
+			{
+				MeshComp = Ragdoll::FindMeshOnConstructionScript(OwnerClass);
+			}
+		}
+	}
+
+	if (!MeshComp)
+	{
+		return nullptr;
+	}
+
+	if (const UPhysicsAsset* PhysAsset = MeshComp->GetPhysicsAsset())
+	{
+		return PhysAsset;
+	}
+
+	const USkeletalMesh* SkelMesh = MeshComp->GetSkeletalMeshAsset();
+	return SkelMesh ? SkelMesh->GetPhysicsAsset() : nullptr;
+}
+
+TArray<FString> URagdollComponent::GetPhysicalAnimationProfileOptions() const
+{
+	TArray<FString> Options { TEXT("None") };
+
+	if (const UPhysicsAsset* PhysAsset = GetEditorPhysicsAsset())
+	{
+		for (const FName& ProfileName : PhysAsset->GetPhysicalAnimationProfileNames())
+		{
+			Options.Add(ProfileName.ToString());
+		}
+	}
+
+	return Options;
+}
+
+TArray<FString> URagdollComponent::GetConstraintProfileOptions() const
+{
+	TArray<FString> Options { TEXT("None") };
+
+	if (const UPhysicsAsset* PhysAsset = GetEditorPhysicsAsset())
+	{
+		for (const FName& ProfileName : PhysAsset->GetConstraintProfileNames())
+		{
+			Options.Add(ProfileName.ToString());
+		}
+	}
+
+	return Options;
+}
+#endif
+
 // ============================================================================
 // State Management
 // ============================================================================
@@ -741,6 +877,7 @@ void URagdollComponent::SetState(ERagdollState NewState)
 	{
 		RestoreCollisionEnabled();
 		RestoreCollisionProfile();
+		RestoreConstraintProfile();
 		Sleep();
 
 		if (bRestoreMovementOnEnd)
@@ -860,8 +997,19 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 	for (const FRagdollBoneGroup& Group : ActiveProfile.BoneGroups)
 	{
 		WarnIfGroupUnanchored(Group);
-		PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(Group.RootBone, Group.PhysicalAnimData, Group.bIncludeRootBone);
+
+		if (!Group.PhysicalAnimationProfile.IsNone())
+		{
+			WarnIfPhysicalAnimationProfileMissing(Group.RootBone, Group.PhysicalAnimationProfile);
+			PhysicalAnimation->ApplyPhysicalAnimationProfileBelow(Group.RootBone, Group.PhysicalAnimationProfile, Group.bIncludeRootBone);
+		}
+		else
+		{
+			PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(Group.RootBone, Group.PhysicalAnimData, Group.bIncludeRootBone);
+		}
 	}
+
+	ApplyConstraintProfile(ActiveProfile.ConstraintProfile);
 
 	// Bones held off physics get no motor either, so they cost nothing while the group runs
 	for (const FRagdollBoneOverride& Override : ActiveProfile.BoneOverrides)
@@ -1277,10 +1425,24 @@ void URagdollComponent::SetupRagdoll(const FVector& Impulse)
 	Mesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
 
 	PhysicalAnimation->SetSkeletalMeshComponent(Mesh);
-	PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(
-		RagdollSettings.SimulationRootBone,
-		RagdollSettings.PhysicalAnimData,
-		RagdollSettings.bIncludeSimulationRoot);
+
+	if (!RagdollSettings.PhysicalAnimationProfile.IsNone())
+	{
+		WarnIfPhysicalAnimationProfileMissing(RagdollSettings.SimulationRootBone, RagdollSettings.PhysicalAnimationProfile);
+		PhysicalAnimation->ApplyPhysicalAnimationProfileBelow(
+			RagdollSettings.SimulationRootBone,
+			RagdollSettings.PhysicalAnimationProfile,
+			RagdollSettings.bIncludeSimulationRoot);
+	}
+	else
+	{
+		PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(
+			RagdollSettings.SimulationRootBone,
+			RagdollSettings.PhysicalAnimData,
+			RagdollSettings.bIncludeSimulationRoot);
+	}
+
+	ApplyConstraintProfile(RagdollSettings.ConstraintProfile);
 
 	Mesh->SetAllBodiesBelowSimulatePhysics(
 		RagdollSettings.SimulationRootBone, true,
@@ -1724,6 +1886,79 @@ void URagdollComponent::RestoreCollisionProfile()
 	OriginalCollisionProfileName = NAME_None;
 }
 
+void URagdollComponent::ApplyConstraintProfile(FName ProfileName)
+{
+	if (!Mesh)
+	{
+		return;
+	}
+
+	if (ProfileName.IsNone())
+	{
+		RestoreConstraintProfile();
+		return;
+	}
+
+	bConstraintProfileChanged = true;
+	Mesh->SetConstraintProfileForAll(ProfileName, true);
+}
+
+void URagdollComponent::RestoreConstraintProfile()
+{
+	if (!bConstraintProfileChanged)
+	{
+		return;
+	}
+
+	bConstraintProfileChanged = false;
+
+	if (Mesh)
+	{
+		Mesh->SetConstraintProfileForAll(DefaultConstraintProfile, true);
+	}
+}
+
+const FPhysicalAnimationData* URagdollComponent::FindPhysicalAnimationProfileData(FName BoneName, FName ProfileName) const
+{
+	const UPhysicsAsset* PhysAsset = Mesh ? Mesh->GetPhysicsAsset() : nullptr;
+	if (!PhysAsset || ProfileName.IsNone())
+	{
+		return nullptr;
+	}
+
+	const int32 BodyIndex = PhysAsset->FindBodyIndex(BoneName);
+	if (!PhysAsset->SkeletalBodySetups.IsValidIndex(BodyIndex))
+	{
+		return nullptr;
+	}
+
+	const USkeletalBodySetup* BodySetup = PhysAsset->SkeletalBodySetups[BodyIndex];
+	const FPhysicalAnimationProfile* Profile = BodySetup ? BodySetup->FindPhysicalAnimationProfile(ProfileName) : nullptr;
+	return Profile ? &Profile->PhysicalAnimationData : nullptr;
+}
+
+void URagdollComponent::WarnIfPhysicalAnimationProfileMissing(FName BoneName, FName ProfileName) const
+{
+	const UPhysicsAsset* PhysAsset = Mesh ? Mesh->GetPhysicsAsset() : nullptr;
+	if (!PhysAsset || ProfileName.IsNone())
+	{
+		return;
+	}
+
+	// A bone without a body carries no profile of its own, and the bodies below it may still have one
+	const int32 BodyIndex = PhysAsset->FindBodyIndex(BoneName);
+	if (!PhysAsset->SkeletalBodySetups.IsValidIndex(BodyIndex))
+	{
+		return;
+	}
+
+	if (!FindPhysicalAnimationProfileData(BoneName, ProfileName))
+	{
+		UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s asks for physical animation profile '%s' on '%s', which %s does not define for that body, so it receives no motor drive"),
+			*GetNameSafe(GetOwner()), *ProfileName.ToString(), *BoneName.ToString(), *GetNameSafe(PhysAsset));
+	}
+}
+
 void URagdollComponent::EnsurePhysicsCollision()
 {
 	if (!bAutoEnablePhysicsCollision || !Mesh)
@@ -1768,7 +2003,7 @@ void URagdollComponent::RestoreCollisionEnabled()
 
 void URagdollComponent::WarnIfGroupUnanchored(const FRagdollBoneGroup& Group) const
 {
-	if (!Group.bIncludeRootBone || !Group.PhysicalAnimData.bIsLocalSimulation || !Mesh)
+	if (!Group.bIncludeRootBone || !Mesh)
 	{
 		return;
 	}
@@ -1776,6 +2011,17 @@ void URagdollComponent::WarnIfGroupUnanchored(const FRagdollBoneGroup& Group) co
 	const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
 	const USkeletalMesh* SkelMesh = Mesh->GetSkeletalMeshAsset();
 	if (!PhysAsset || !SkelMesh)
+	{
+		return;
+	}
+
+	const FPhysicalAnimationData* ProfileData = FindPhysicalAnimationProfileData(Group.RootBone, Group.PhysicalAnimationProfile);
+	if (!Group.PhysicalAnimationProfile.IsNone() && !ProfileData)
+	{
+		return;
+	}
+
+	if (!(ProfileData ? ProfileData->bIsLocalSimulation : Group.PhysicalAnimData.bIsLocalSimulation))
 	{
 		return;
 	}

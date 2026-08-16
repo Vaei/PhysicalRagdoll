@@ -100,6 +100,20 @@ Coming soon
 
 <!--TODO ABP setup -->
 
+### Physics Asset Profiles
+
+Every state can optionally use the profiles authored in the physics asset instead of its inline settings, picked from a dropdown listing that asset's profile names.
+
+| Setting | Where | Effect |
+| --- | --- | --- |
+| `PhysicalAnimationProfile` | Per bone group, and on `RagdollSettings` | Drives those bodies from the named physical animation profile instead of `PhysicalAnimData` |
+| `ConstraintProfile` | Per physical profile, and on `RagdollSettings` | Applied to every joint while that state is active |
+| `DefaultConstraintProfile` | Component | What constraints revert to once a state that applied one ends |
+
+All optional: leave any of them as `None` to keep the inline settings and leave constraints untouched.
+
+The dropdowns list the names from the owner's physics asset, resolved from its skeletal mesh. Set `ProfileSourcePhysicsAsset` when there is no owner to resolve from - editing a Blueprint of the component itself, or a mesh only assigned at runtime.
+
 ### Engine Crash Fix
 
 `URagdollPhysicalAnimationComponent` extends `UPhysicalAnimationComponent` and guards against the engine crash in `UpdatePhysicsEngineImp` when bone transforms are empty during tick. `URagdollComponent` creates one automatically if the owner doesn't already have a physical animation component, and warns if it finds an unguarded one.
