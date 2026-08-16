@@ -1,4 +1,4 @@
-# Physical Ragdoll
+# Physical Ragdoll <img align="right" width=128, height=128 src="https://github.com/Vaei/PhysicalRagdoll/blob/main/Resources/Icon128.png">
 
 > [!IMPORTANT]
 > **Physically Animated Characters**
@@ -10,7 +10,7 @@
 > Supports UE5.8+
 
 > [!CAUTION]
-> Physical Ragdoll is a fully experimental prototype that may eventually be deleted entirely, or changed in a significant way
+> Physical Ragdoll is a fully experimental prototype that may eventually be deleted entirely, or changed in a significant way. It is not fully released so expect bugs and undocumented changes.
 
 ## Features
 
@@ -153,11 +153,13 @@ Add `FRagdollMotionDriveState MotionDriveState;` and `FRagdollMotionDrive Motion
 
 Use these params as a starting point:
 
-<!-- TODO image -->
+<img width="589" height="640" alt="UnrealEditor-Win64-DebugGame_2026-08-17_10-39-22" src="https://github.com/user-attachments/assets/9cd28a02-f01b-476b-99dc-fb1d67ab7aaf" />
 
 Then in your character's tick from either C++ or BP:
 
-<!-- TODO image -->
+<img width="1403" height="717" alt="UnrealEditor-Win64-DebugGame_2026-08-17_10-46-11" src="https://github.com/user-attachments/assets/a7df52e2-c71f-447c-b8ec-1a0b331e4ea1" />
+
+Test, then tune from there.
 
 ### Console Commands
 
