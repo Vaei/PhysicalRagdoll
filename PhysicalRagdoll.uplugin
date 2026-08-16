@@ -1,0 +1,23 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Physical Ragdoll",
+	"Description": "Physically animated characters - a persistent physics layer blended over regular animation, plus ragdoll and get-up recovery.",
+	"Category": "Physics",
+	"CreatedBy": "Jared Taylor (Vaei)",
+	"CreatedByURL": "https://vaei.github.io/",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "PhysicalRagdoll",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		}
+	]
+}
