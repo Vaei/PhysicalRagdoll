@@ -20,7 +20,8 @@ struct FBodyInstance;
  * simulation state from that weight so the two can't disagree.
  *
  * Writing FBodyInstance::PhysicsBlendWeight directly skips the bookkeeping the engine's setters do,
- * so FinalizeMeshPhysics must be called once after any batch of writes.
+ * so FinalizeMeshPhysics must be called once after any batch of writes. UPhysicsControlComponent
+ * writes the weight the same way and skips the same bookkeeping, so this is still needed alongside it.
  */
 UCLASS()
 class PHYSICALRAGDOLL_API URagdollStatics : public UBlueprintFunctionLibrary

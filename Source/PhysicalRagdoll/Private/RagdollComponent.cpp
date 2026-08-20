@@ -4,7 +4,6 @@
 
 #include "PhysicalRagdoll.h"
 #include "PhysicalRagdollTags.h"
-#include "RagdollPhysicalAnimationComponent.h"
 #include "RagdollStatics.h"
 #include "CollisionQueryParams.h"
 #include "DrawDebugHelpers.h"
@@ -16,9 +15,11 @@
 #include "Curves/CurveFloat.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
+#include "PhysicsControlComponent.h"
+#include "PhysicsControlHelpers.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/ConstraintInstance.h"
 #include "PhysicsEngine/PhysicsAsset.h"
-#include "PhysicsEngine/SkeletalBodySetup.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -33,6 +34,9 @@
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RagdollComponent)
 
 static constexpr float GRagdollWeightTolerance = 0.001f;
+
+/** Set every control and body modifier this component owns belongs to, so they can be torn down together */
+static const FName GRagdollOperatorSet(TEXT("Ragdoll"));
 
 namespace Ragdoll
 {
@@ -101,11 +105,10 @@ URagdollComponent::URagdollComponent(const FObjectInitializer& ObjectInitializer
 	PrimaryComponentTick.bAllowTickOnDedicatedServer = false;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 
-	PhysicalAnimationComponentClass = URagdollPhysicalAnimationComponent::StaticClass();
-	
+	PhysicsControlComponentClass = UPhysicsControlComponent::StaticClass();
+
 	// Ragdoll defaults
-	RagdollSettings.PhysicalAnimData.bIsLocalSimulation = false;
-	RagdollSettings.PhysicalAnimData.OrientationStrength = 30.f;
+	RagdollSettings.ControlData.AngularStrength = 0.87f;
 	
 	// Set up a ready-to-go implementation for always-on profile
 	{
@@ -114,11 +117,11 @@ URagdollComponent::URagdollComponent(const FObjectInitializer& ObjectInitializer
 
 		FRagdollBoneGroup& Bone = Profile.BoneGroups.Add_GetRef(FRagdollBoneGroup(TEXT("spine_01")));
 		Bone.BlendWeight = 0.6f;
-		Bone.PhysicalAnimData.bIsLocalSimulation = false;
-		Bone.PhysicalAnimData.OrientationStrength = 400.f;
-		Bone.PhysicalAnimData.AngularVelocityStrength = 10.f;
-		Bone.PhysicalAnimData.PositionStrength = 5.f;
-		Bone.PhysicalAnimData.VelocityStrength = 5.f;
+		Bone.ControlType = EPhysicsControlType::WorldSpace;
+		Bone.ControlData.AngularStrength = 3.2f;
+		Bone.ControlData.AngularDampingRatio = 0.25f;
+		Bone.ControlData.LinearStrength = 0.36f;
+		Bone.ControlData.LinearDampingRatio = 1.1f;
 	
 		Profile.BoneOverrides.Add(FRagdollBoneOverride(TEXT("spine_05"), true, false, 0.35f));
 		Profile.BoneOverrides.Add(FRagdollBoneOverride(TEXT("neck_01"), true, false, 0.2f));
@@ -385,8 +388,15 @@ void URagdollComponent::SetPhysicalProfile(FGameplayTag ProfileTag)
 	const FRagdollPhysicalProfile* Profile = PhysicalProfiles.Find(ProfileTag);
 	if (!Profile)
 	{
-		UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s has no physical profile for %s"),
-			*GetNameSafe(GetOwner()), *ProfileTag.ToString());
+		FString Keys;
+		for (const TPair<FGameplayTag, FRagdollPhysicalProfile>& Pair : PhysicalProfiles)
+		{
+			Keys += FString::Printf(TEXT("'%s'(valid=%d) "), *Pair.Key.ToString(), Pair.Key.IsValid() ? 1 : 0);
+		}
+
+		UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s has no physical profile for '%s' (valid=%d). PhysicalProfiles holds %d: %s"),
+			*GetNameSafe(GetOwner()), *ProfileTag.ToString(), ProfileTag.IsValid() ? 1 : 0,
+			PhysicalProfiles.Num(), Keys.IsEmpty() ? TEXT("<empty>") : *Keys);
 		return;
 	}
 
@@ -694,18 +704,47 @@ void URagdollComponent::DebugDumpBodies() const
 		return;
 	}
 
-	UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: state=%d profile=%s bones=%d alpha=%.2f"),
-		static_cast<int32>(CurrentState), *ActiveProfileTag.ToString(), BoneWeights.Num(), PhysicalAlpha);
+	UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: state=%d profile=%s bones=%d alpha=%.2f strength=%.2f lod=%.2f"),
+		static_cast<int32>(CurrentState), *ActiveProfileTag.ToString(), BoneWeights.Num(), PhysicalAlpha,
+		CurrentStrength, LODScale);
+
+	// Physics blending is skipped wholesale without physics collision on the mesh, so it is the first thing to rule out
+	UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: mesh collision=%d hasPhysics=%d profile=%s control=%s controls=%d modifiers=%d"),
+		static_cast<int32>(Mesh->GetCollisionEnabled()),
+		CollisionEnabledHasPhysics(Mesh->GetCollisionEnabled()) ? 1 : 0,
+		*Mesh->GetCollisionProfileName().ToString(),
+		*GetNameSafe(PhysicsControl),
+		PhysicsControl ? PhysicsControl->GetControlNamesInSet(GRagdollOperatorSet).Num() : -1,
+		PhysicsControl ? PhysicsControl->GetBodyModifierNamesInSet(GRagdollOperatorSet).Num() : -1);
 
 	for (const FBodyInstance* Body : Mesh->Bodies)
 	{
-		if (Body && Body->BodySetup.Get())
+		const UBodySetup* BodySetup = Body ? Body->GetBodySetup() : nullptr;
+		if (!BodySetup)
 		{
-			UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: %s sim=%d weight=%.3f"),
-				*Body->BodySetup.Get()->BoneName.ToString(),
-				Body->IsInstanceSimulatingPhysics() ? 1 : 0,
-				Body->PhysicsBlendWeight);
+			continue;
 		}
+
+		const FName BoneName = BodySetup->BoneName;
+		const FName OperatorName = MakeOperatorName(BoneName);
+
+		FPhysicsControlData ControlData;
+		const bool bHasControl = PhysicsControl && PhysicsControl->GetControlData(OperatorName, ControlData);
+
+		UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: %s sim=%d weight=%.3f shapeCollision=%d control=%d enabled=%d angular=%.2f linear=%.2f"),
+			*BoneName.ToString(),
+			Body->IsInstanceSimulatingPhysics() ? 1 : 0,
+			Body->PhysicsBlendWeight,
+			BodySetup->AggGeom.GetElementCount() > 0 ? static_cast<int32>(Body->GetShapeCollisionEnabled(0)) : -1,
+			bHasControl ? 1 : 0,
+			bHasControl && ControlData.bEnabled ? 1 : 0,
+			bHasControl ? ControlData.AngularStrength : 0.f,
+			bHasControl ? ControlData.LinearStrength : 0.f);
+	}
+
+	if (PhysicsControl)
+	{
+		PhysicsControl->LogControlsAndBodyModifiers();
 	}
 #endif
 }
@@ -828,21 +867,6 @@ const UPhysicsAsset* URagdollComponent::GetEditorPhysicsAsset() const
 	return SkelMesh ? SkelMesh->GetPhysicsAsset() : nullptr;
 }
 
-TArray<FString> URagdollComponent::GetPhysicalAnimationProfileOptions() const
-{
-	TArray<FString> Options { TEXT("None") };
-
-	if (const UPhysicsAsset* PhysAsset = GetEditorPhysicsAsset())
-	{
-		for (const FName& ProfileName : PhysAsset->GetPhysicalAnimationProfileNames())
-		{
-			Options.Add(ProfileName.ToString());
-		}
-	}
-
-	return Options;
-}
-
 TArray<FString> URagdollComponent::GetConstraintProfileOptions() const
 {
 	TArray<FString> Options { TEXT("None") };
@@ -930,28 +954,165 @@ void URagdollComponent::CacheReferences()
 		bHasCachedMeshTransform = true;
 	}
 
-	if (!PhysicalAnimation)
+	if (!PhysicsControl)
 	{
-		PhysicalAnimation = Owner->FindComponentByClass<UPhysicalAnimationComponent>();
+		PhysicsControl = Owner->FindComponentByClass<UPhysicsControlComponent>();
 
-		if (!PhysicalAnimation && PhysicalAnimationComponentClass)
+		if (!PhysicsControl && PhysicsControlComponentClass)
 		{
-			PhysicalAnimation = NewObject<UPhysicalAnimationComponent>(Owner, PhysicalAnimationComponentClass,
-				TEXT("RagdollPhysicalAnimation"));
-			PhysicalAnimation->RegisterComponent();
+			PhysicsControl = NewObject<UPhysicsControlComponent>(Owner, PhysicsControlComponentClass,
+				TEXT("RagdollPhysicsControl"));
+			PhysicsControl->SetupAttachment(Owner->GetRootComponent());
+			PhysicsControl->RegisterComponent();
 		}
 
-		if (PhysicalAnimation && !PhysicalAnimation->IsA<URagdollPhysicalAnimationComponent>())
+		if (PhysicsControl)
 		{
-			UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s uses %s rather than a URagdollPhysicalAnimationComponent, which is not guarded against the engine crash when bone transforms are empty during tick"),
-				*GetNameSafe(Owner), *GetNameSafe(PhysicalAnimation->GetClass()));
+			// Weights and strengths are written from our tick, and the control component reads them on
+			// its own, so it has to come second within the tick group
+			PhysicsControl->PrimaryComponentTick.AddPrerequisite(this, PrimaryComponentTick);
 		}
 	}
 }
 
 bool URagdollComponent::HasValidPhysics() const
 {
-	return Mesh && PhysicalAnimation && Mesh->GetPhysicsAsset();
+	return Mesh && PhysicsControl && Mesh->GetPhysicsAsset();
+}
+
+// ============================================================================
+// Controls and Body Modifiers
+// ============================================================================
+
+FName URagdollComponent::MakeOperatorName(FName BoneName)
+{
+	return FName(*(TEXT("Ragdoll_") + BoneName.ToString()));
+}
+
+void URagdollComponent::EnsureBodyModifierForBone(FName BoneName)
+{
+	const FName Name = MakeOperatorName(BoneName);
+	if (PhysicsControl->GetBodyModifierExists(Name))
+	{
+		return;
+	}
+
+	FPhysicsControlModifierData ModifierData;
+	ModifierData.MovementType = EPhysicsMovementType::Default;
+	ModifierData.PhysicsBlendWeight = 0.f;
+
+	// The modifier rewrites every shape's collision each tick, so it has to start from what the body
+	// already has or simply owning a modifier would change the body's collision
+	const FBodyInstance* BI = Mesh->GetBodyInstance(BoneName);
+	const UBodySetup* BodySetup = BI ? BI->GetBodySetup() : nullptr;
+	if (BodySetup && BodySetup->AggGeom.GetElementCount() > 0)
+	{
+		ModifierData.CollisionType = BI->GetShapeCollisionEnabled(0);
+	}
+
+	PhysicsControl->CreateNamedBodyModifier(Name, Mesh, BoneName, GRagdollOperatorSet, ModifierData);
+}
+
+void URagdollComponent::CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData,
+	EPhysicsControlType ControlType, FName ConstraintProfile)
+{
+	EnsureBodyModifierForBone(BoneName);
+
+	const FName Name = MakeOperatorName(BoneName);
+	if (PhysicsControl->GetControlExists(Name))
+	{
+		PhysicsControl->DestroyControl(Name, true, false);
+	}
+
+	// A joint drive is expressed relative to the parent body, so reading one implies parent space
+	const bool bParentSpace = ControlType == EPhysicsControlType::ParentSpace || !ConstraintProfile.IsNone();
+	const FName ParentBoneName = bParentSpace
+		? UE::PhysicsControl::GetPhysicalParentBone(Mesh, BoneName)
+		: NAME_None;
+	UPrimitiveComponent* ParentComponent = ParentBoneName.IsNone() ? nullptr : Mesh.Get();
+
+	FPhysicsControlData Data = ControlData;
+
+	if (!ConstraintProfile.IsNone() && ParentComponent)
+	{
+		FConstraintProfileProperties ProfileProperties;
+		if (Mesh->GetConstraintProfilePropertiesOrDefault(ProfileProperties, BoneName, ConstraintProfile))
+		{
+			UE::PhysicsControl::ConvertConstraintProfileToControlData(Data, ProfileProperties);
+
+			// A joint drive has no animation target velocity, so its damping acts against the world
+			Data.AngularTargetVelocityMultiplier = 0.f;
+			Data.LinearTargetVelocityMultiplier = 0.f;
+		}
+	}
+
+	PhysicsControl->CreateNamedControl(Name, ParentComponent, ParentBoneName, Mesh, BoneName,
+		Data, FPhysicsControlTarget(), GRagdollOperatorSet);
+}
+
+void URagdollComponent::DestroyDriveForBone(FName BoneName)
+{
+	if (!PhysicsControl)
+	{
+		return;
+	}
+
+	const FName Name = MakeOperatorName(BoneName);
+	if (PhysicsControl->GetControlExists(Name))
+	{
+		PhysicsControl->DestroyControl(Name, true, false);
+	}
+	if (PhysicsControl->GetBodyModifierExists(Name))
+	{
+		PhysicsControl->DestroyBodyModifier(Name, true, false);
+	}
+}
+
+void URagdollComponent::DestroyAllDrives()
+{
+	if (!PhysicsControl)
+	{
+		return;
+	}
+
+	if (PhysicsControl->GetControlNamesInSet(GRagdollOperatorSet).Num() > 0)
+	{
+		PhysicsControl->DestroyControlsInSet(GRagdollOperatorSet);
+	}
+	if (PhysicsControl->GetBodyModifierNamesInSet(GRagdollOperatorSet).Num() > 0)
+	{
+		PhysicsControl->DestroyBodyModifiersInSet(GRagdollOperatorSet);
+	}
+}
+
+void URagdollComponent::ApplyBoneWeight(FName BoneName, float Weight) const
+{
+	const FName Name = MakeOperatorName(BoneName);
+
+	// Default rather than Kinematic at zero: a kinematic modifier drives the body to a cached target,
+	// which is work animation is already doing
+	PhysicsControl->SetBodyModifierMovementType(Name,
+		Weight > 0.f ? EPhysicsMovementType::Simulated : EPhysicsMovementType::Default, true, false);
+	PhysicsControl->SetBodyModifierPhysicsBlendWeight(Name, Weight, true, false);
+
+	// The control component applies its modifiers on its own tick and never does the mesh level
+	// bookkeeping FinalizeMeshPhysics needs, so the weight goes straight to the body as well
+	URagdollStatics::SetBlendWeight(Mesh, BoneName, Weight);
+}
+
+void URagdollComponent::ApplyStrengthMultiplier(float Multiplier) const
+{
+	// Addressing an empty set logs a warning, and a profile with no groups is legitimate
+	if (PhysicsControl->GetControlNamesInSet(GRagdollOperatorSet).IsEmpty())
+	{
+		return;
+	}
+
+	FPhysicsControlMultiplier Mult;
+	Mult.LinearStrengthMultiplier = FVector(Multiplier);
+	Mult.AngularStrengthMultiplier = Multiplier;
+
+	PhysicsControl->SetControlMultipliersInSet(GRagdollOperatorSet, Mult);
 }
 
 // ============================================================================
@@ -992,39 +1153,47 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 	EnsurePhysicsCollision();
 	ResolveBoneOverrides();
 
-	PhysicalAnimation->SetSkeletalMeshComponent(Mesh);
+	// The drive definition changes wholesale, so start from nothing rather than reconcile it. Modifiers
+	// are left alone, since a bone the new profile has dropped still needs one to fade its weight out.
+	if (PhysicsControl->GetControlNamesInSet(GRagdollOperatorSet).Num() > 0)
+	{
+		PhysicsControl->DestroyControlsInSet(GRagdollOperatorSet);
+	}
 
 	for (const FRagdollBoneGroup& Group : ActiveProfile.BoneGroups)
 	{
 		WarnIfGroupUnanchored(Group);
 
-		if (!Group.PhysicalAnimationProfile.IsNone())
+		URagdollStatics::ForEach(Mesh, Group.RootBone, Group.bIncludeRootBone, [this, &Group](const FBodyInstance* BI)
 		{
-			WarnIfPhysicalAnimationProfileMissing(Group.RootBone, Group.PhysicalAnimationProfile);
-			PhysicalAnimation->ApplyPhysicalAnimationProfileBelow(Group.RootBone, Group.PhysicalAnimationProfile, Group.bIncludeRootBone);
-		}
-		else
-		{
-			PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(Group.RootBone, Group.PhysicalAnimData, Group.bIncludeRootBone);
-		}
+			const FName BoneName = URagdollStatics::GetBoneName(Mesh, BI);
+
+			// Bones held off physics get no control either, so they cost nothing while the group runs
+			const FRagdollBoneOverride* Override = ResolvedBoneOverrides.Find(BoneName);
+			if (Override && Override->bDisablePhysics)
+			{
+				return true;
+			}
+
+			CreateDriveForBone(BoneName, Group.ControlData, Group.ControlType, Group.ControlDataConstraintProfile);
+			return true;
+		});
 	}
 
 	ApplyConstraintProfile(ActiveProfile.ConstraintProfile);
 
-	// Bones held off physics get no motor either, so they cost nothing while the group runs
-	for (const FRagdollBoneOverride& Override : ActiveProfile.BoneOverrides)
+	if (CurrentState != ERagdollState::Physical)
 	{
-		if (Override.bDisablePhysics && Override.BoneName != NAME_None)
-		{
-			PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(Override.BoneName, FPhysicalAnimationData(), Override.bIncludeSelf);
-		}
+		// Controls drive toward the animated pose, so they can come up instantly; only the weight ramps
+		CurrentStrength = ActiveProfile.StrengthMultiplier * PhysicalStrength;
 	}
+
+	// The controls above were created at full strength, so the running value has to land on them before
+	// the control component's tick sees them
+	ApplyStrengthMultiplier(CurrentStrength);
 
 	if (CurrentState != ERagdollState::Physical)
 	{
-		// Motors drive toward the animated pose, so they can come up instantly; only the blend weight ramps
-		CurrentStrength = ActiveProfile.StrengthMultiplier * PhysicalStrength;
-		PhysicalAnimation->SetStrengthMultiplyer(CurrentStrength);
 		SetState(ERagdollState::Physical);
 	}
 	else
@@ -1049,16 +1218,12 @@ void URagdollComponent::TeardownPhysical()
 		URagdollStatics::FinalizeMeshPhysics(Mesh);
 	}
 
+	DestroyAllDrives();
+
 	BoneWeights.Reset();
 	ResolvedBoneOverrides.Reset();
 	ActiveProfileTag = FGameplayTag::EmptyTag;
 	CurrentStrength = 0.f;
-
-	if (PhysicalAnimation)
-	{
-		PhysicalAnimation->SetStrengthMultiplyer(1.f);
-		PhysicalAnimation->SetSkeletalMeshComponent(nullptr);
-	}
 }
 
 void URagdollComponent::ResolveBoneOverrides()
@@ -1143,26 +1308,7 @@ void URagdollComponent::AddPhysicalBias(FVector Bias, FName BoneName, float Heig
 				BI->WakeInstance();
 			}
 
-			FVector Applied = Bias;
-
-			if (bRestoreLinearDrift && PhysicalAnimation)
-			{
-				// Local simulation drives orientation only, so nothing holds a body's position. Without
-				// this the bias is an open-ended acceleration and the body walks away from its pose.
-				const FName BodyBone = URagdollStatics::GetBoneName(Mesh, BI);
-				const FVector Target = PhysicalAnimation->GetBodyTargetTransform(BodyBone).GetLocation();
-				const FVector Drift = BI->GetUnrealWorldTransform().GetLocation() - Target;
-
-				Applied -= Drift * LinearRestoreStiffness;
-
-				// Damped along the drift only, so travelling with the animation is left alone
-				const FVector DriftDir = Drift.GetSafeNormal();
-				if (!DriftDir.IsNearlyZero())
-				{
-					const float DriftSpeed = FVector::DotProduct(BI->GetUnrealWorldVelocity(), DriftDir);
-					Applied -= DriftDir * DriftSpeed * LinearRestoreDamping;
-				}
-			}
+			const FVector& Applied = Bias;
 
 			// Above the centre of mass, so the push has a lever arm to pitch the body with rather than
 			// just translating it. Mass scaled, since AddForceAtPosition has no acceleration mode.
@@ -1289,7 +1435,9 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 			bConverged = false;
 		}
 
-		URagdollStatics::SetBlendWeight(Mesh, Pair.Key, Current);
+		// Bones a new profile dropped keep a modifier so their weight can still fade to zero
+		EnsureBodyModifierForBone(Pair.Key);
+		ApplyBoneWeight(Pair.Key, Current);
 	}
 
 	URagdollStatics::FinalizeMeshPhysics(Mesh);
@@ -1311,6 +1459,7 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 	{
 		if (It->Value <= 0.f && !Targets.FindChecked(It->Key))
 		{
+			DestroyDriveForBone(It->Key);
 			It.RemoveCurrent();
 		}
 	}
@@ -1328,7 +1477,7 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 	{
 		bConverged = false;
 	}
-	PhysicalAnimation->SetStrengthMultiplyer(CurrentStrength);
+	ApplyStrengthMultiplier(CurrentStrength);
 
 	if (BoneWeights.Num() == 0 && (ActiveProfile.BoneGroups.Num() == 0 || IsPhysicalSuspended()))
 	{
@@ -1424,23 +1573,16 @@ void URagdollComponent::SetupRagdoll(const FVector& Impulse)
 	// Detach so capsule tracking doesn't feed back into the simulation
 	Mesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
 
-	PhysicalAnimation->SetSkeletalMeshComponent(Mesh);
+	// Ragdoll takes the whole subtree, so the physical layer's per-bone drives are replaced outright
+	DestroyAllDrives();
 
-	if (!RagdollSettings.PhysicalAnimationProfile.IsNone())
+	URagdollStatics::ForEach(Mesh, RagdollSettings.SimulationRootBone, RagdollSettings.bIncludeSimulationRoot,
+		[this](const FBodyInstance* BI)
 	{
-		WarnIfPhysicalAnimationProfileMissing(RagdollSettings.SimulationRootBone, RagdollSettings.PhysicalAnimationProfile);
-		PhysicalAnimation->ApplyPhysicalAnimationProfileBelow(
-			RagdollSettings.SimulationRootBone,
-			RagdollSettings.PhysicalAnimationProfile,
-			RagdollSettings.bIncludeSimulationRoot);
-	}
-	else
-	{
-		PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(
-			RagdollSettings.SimulationRootBone,
-			RagdollSettings.PhysicalAnimData,
-			RagdollSettings.bIncludeSimulationRoot);
-	}
+		CreateDriveForBone(URagdollStatics::GetBoneName(Mesh, BI), RagdollSettings.ControlData,
+			RagdollSettings.ControlType, RagdollSettings.ControlDataConstraintProfile);
+		return true;
+	});
 
 	ApplyConstraintProfile(RagdollSettings.ConstraintProfile);
 
@@ -1448,8 +1590,13 @@ void URagdollComponent::SetupRagdoll(const FVector& Impulse)
 		RagdollSettings.SimulationRootBone, true,
 		RagdollSettings.bIncludeSimulationRoot);
 
+	if (!PhysicsControl->GetBodyModifierNamesInSet(GRagdollOperatorSet).IsEmpty())
+	{
+		PhysicsControl->SetBodyModifiersInSetMovementType(GRagdollOperatorSet, EPhysicsMovementType::Simulated);
+	}
+
 	RagdollMotorStrength = 1.f;
-	PhysicalAnimation->SetStrengthMultiplyer(RagdollMotorStrength);
+	ApplyStrengthMultiplier(RagdollMotorStrength);
 	bRagdollBlendComplete = false;
 
 	if (RagdollSettings.ImpulseStrength > UE_KINDA_SMALL_NUMBER)
@@ -1493,11 +1640,7 @@ void URagdollComponent::TeardownRagdoll()
 		Mesh->SetAllBodiesBelowPhysicsBlendWeight(RagdollSettings.SimulationRootBone, 0.f, false, RagdollSettings.bIncludeSimulationRoot);
 	}
 
-	if (PhysicalAnimation)
-	{
-		PhysicalAnimation->SetStrengthMultiplyer(1.f);
-		PhysicalAnimation->SetSkeletalMeshComponent(nullptr);
-	}
+	DestroyAllDrives();
 
 	SnapMeshToCapsule();
 
@@ -1518,9 +1661,13 @@ void URagdollComponent::TickRagdoll(float DeltaTime)
 	Mesh->SetAllBodiesBelowPhysicsBlendWeight(
 		RagdollSettings.SimulationRootBone, RagdollWeight,
 		false, RagdollSettings.bIncludeSimulationRoot);
+	if (!PhysicsControl->GetBodyModifierNamesInSet(GRagdollOperatorSet).IsEmpty())
+	{
+		PhysicsControl->SetBodyModifiersInSetPhysicsBlendWeight(GRagdollOperatorSet, RagdollWeight);
+	}
 
 	RagdollMotorStrength = RagdollSettings.MotorDecay.Interp(RagdollMotorStrength, 0.f, DeltaTime);
-	PhysicalAnimation->SetStrengthMultiplyer(RagdollMotorStrength);
+	ApplyStrengthMultiplier(RagdollMotorStrength);
 
 	if (!bRagdollBlendComplete
 		&& FMath::IsNearlyEqual(RagdollWeight, 1.f, GRagdollWeightTolerance)
@@ -1559,11 +1706,7 @@ void URagdollComponent::SetupRecovery()
 	Mesh->SetAllBodiesBelowSimulatePhysics(RagdollSettings.SimulationRootBone, false, RagdollSettings.bIncludeSimulationRoot);
 	Mesh->SetAllBodiesBelowPhysicsBlendWeight(RagdollSettings.SimulationRootBone, 0.f, false, RagdollSettings.bIncludeSimulationRoot);
 
-	if (PhysicalAnimation)
-	{
-		PhysicalAnimation->SetStrengthMultiplyer(1.f);
-		PhysicalAnimation->SetSkeletalMeshComponent(nullptr);
-	}
+	DestroyAllDrives();
 
 	RagdollWeight = 0.f;
 	RagdollMotorStrength = 1.f;
@@ -1918,47 +2061,6 @@ void URagdollComponent::RestoreConstraintProfile()
 	}
 }
 
-const FPhysicalAnimationData* URagdollComponent::FindPhysicalAnimationProfileData(FName BoneName, FName ProfileName) const
-{
-	const UPhysicsAsset* PhysAsset = Mesh ? Mesh->GetPhysicsAsset() : nullptr;
-	if (!PhysAsset || ProfileName.IsNone())
-	{
-		return nullptr;
-	}
-
-	const int32 BodyIndex = PhysAsset->FindBodyIndex(BoneName);
-	if (!PhysAsset->SkeletalBodySetups.IsValidIndex(BodyIndex))
-	{
-		return nullptr;
-	}
-
-	const USkeletalBodySetup* BodySetup = PhysAsset->SkeletalBodySetups[BodyIndex];
-	const FPhysicalAnimationProfile* Profile = BodySetup ? BodySetup->FindPhysicalAnimationProfile(ProfileName) : nullptr;
-	return Profile ? &Profile->PhysicalAnimationData : nullptr;
-}
-
-void URagdollComponent::WarnIfPhysicalAnimationProfileMissing(FName BoneName, FName ProfileName) const
-{
-	const UPhysicsAsset* PhysAsset = Mesh ? Mesh->GetPhysicsAsset() : nullptr;
-	if (!PhysAsset || ProfileName.IsNone())
-	{
-		return;
-	}
-
-	// A bone without a body carries no profile of its own, and the bodies below it may still have one
-	const int32 BodyIndex = PhysAsset->FindBodyIndex(BoneName);
-	if (!PhysAsset->SkeletalBodySetups.IsValidIndex(BodyIndex))
-	{
-		return;
-	}
-
-	if (!FindPhysicalAnimationProfileData(BoneName, ProfileName))
-	{
-		UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s asks for physical animation profile '%s' on '%s', which %s does not define for that body, so it receives no motor drive"),
-			*GetNameSafe(GetOwner()), *ProfileName.ToString(), *BoneName.ToString(), *GetNameSafe(PhysAsset));
-	}
-}
-
 void URagdollComponent::EnsurePhysicsCollision()
 {
 	if (!bAutoEnablePhysicsCollision || !Mesh)
@@ -2008,44 +2110,34 @@ void URagdollComponent::WarnIfGroupUnanchored(const FRagdollBoneGroup& Group) co
 		return;
 	}
 
-	const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
+	const bool bParentSpace = Group.ControlType == EPhysicsControlType::ParentSpace
+		|| !Group.ControlDataConstraintProfile.IsNone();
+	if (!bParentSpace)
+	{
+		return;
+	}
+
 	const USkeletalMesh* SkelMesh = Mesh->GetSkeletalMeshAsset();
-	if (!PhysAsset || !SkelMesh)
+	if (!SkelMesh)
 	{
 		return;
 	}
 
-	const FPhysicalAnimationData* ProfileData = FindPhysicalAnimationProfileData(Group.RootBone, Group.PhysicalAnimationProfile);
-	if (!Group.PhysicalAnimationProfile.IsNone() && !ProfileData)
-	{
-		return;
-	}
-
-	if (!(ProfileData ? ProfileData->bIsLocalSimulation : Group.PhysicalAnimData.bIsLocalSimulation))
-	{
-		return;
-	}
-
-	const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
-	int32 BoneIndex = RefSkeleton.FindBoneIndex(Group.RootBone);
-	if (BoneIndex == INDEX_NONE)
+	if (SkelMesh->GetRefSkeleton().FindBoneIndex(Group.RootBone) == INDEX_NONE)
 	{
 		UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s physical profile references bone '%s', which is not in %s"),
 			*GetNameSafe(GetOwner()), *Group.RootBone.ToString(), *GetNameSafe(SkelMesh));
 		return;
 	}
 
-	while ((BoneIndex = RefSkeleton.GetParentIndex(BoneIndex)) != INDEX_NONE)
+	if (!UE::PhysicsControl::GetPhysicalParentBone(Mesh, Group.RootBone).IsNone())
 	{
-		if (PhysAsset->FindBodyIndex(RefSkeleton.GetBoneName(BoneIndex)) != INDEX_NONE)
-		{
-			return;
-		}
+		return;
 	}
 
-	// Local simulation zeroes the linear drive, so a body with no parent body has nothing holding it in place
-	UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s physical profile drives '%s' in local simulation, but no ancestor bone has a body in %s, so it has no linear drive and will fall. Start the group below the root body, or clear bIsLocalSimulation and set PositionStrength."),
-		*GetNameSafe(GetOwner()), *Group.RootBone.ToString(), *GetNameSafe(PhysAsset));
+	// A parent space control needs a parent body to drive against, so the group silently falls back to world
+	UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s physical profile drives '%s' in parent space, but no ancestor bone has a body in %s, so it falls back to world space. Start the group below the root body, or set ControlType to WorldSpace."),
+		*GetNameSafe(GetOwner()), *Group.RootBone.ToString(), *GetNameSafe(Mesh->GetPhysicsAsset()));
 }
 
 void URagdollComponent::Wake()

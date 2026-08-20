@@ -102,11 +102,11 @@ Coming soon
 
 ### Physics Asset Profiles
 
-Every state can optionally use the profiles authored in the physics asset instead of its inline settings, picked from a dropdown listing that asset's profile names.
+Every state can optionally take its settings from the constraint profiles authored in the physics asset, picked from a dropdown listing that asset's profile names.
 
 | Setting | Where | Effect |
 | --- | --- | --- |
-| `PhysicalAnimationProfile` | Per bone group, and on `RagdollSettings` | Drives those bodies from the named physical animation profile instead of `PhysicalAnimData` |
+| `ControlDataConstraintProfile` | Per bone group, and on `RagdollSettings` | Initializes those bodies' strengths from the named constraint profile's joint drives instead of `ControlData` |
 | `ConstraintProfile` | Per physical profile, and on `RagdollSettings` | Applied to every joint while that state is active |
 | `DefaultConstraintProfile` | Component | What constraints revert to once a state that applied one ends |
 
@@ -114,9 +114,13 @@ All optional: leave any of them as `None` to keep the inline settings and leave 
 
 The dropdowns list the names from the owner's physics asset, resolved from its skeletal mesh. Set `ProfileSourcePhysicsAsset` when there is no owner to resolve from - editing a Blueprint of the component itself, or a mesh only assigned at runtime.
 
-### Engine Crash Fix
+### Physics Control
 
-`URagdollPhysicalAnimationComponent` extends `UPhysicalAnimationComponent` and guards against the engine crash in `UpdatePhysicsEngineImp` when bone transforms are empty during tick. `URagdollComponent` creates one automatically if the owner doesn't already have a physical animation component, and warns if it finds an unguarded one.
+The drive is `UPhysicsControlComponent` from the engine's PhysicsControl plugin. `URagdollComponent` creates one on the owner if there isn't one already, and makes it tick after itself.
+
+Each driven bone gets a control (the spring/damper toward the animated pose) and a body modifier (simulation state and blend weight), both named `Ragdoll_<Bone>` and in the set `Ragdoll`, so anything else on the same control component is untouched.
+
+Strengths are in `FPhysicsControlData` terms rather than raw stiffness: `Stiffness = (Strength * 2pi)^2`, and damping comes from `DampingRatio` where 1 is critically damped. `AngularStrength` 3.2 is the old `OrientationStrength` 400.
 
 ## How to Use
 
@@ -127,17 +131,17 @@ Add a `URagdollComponent` to your character. The owner needs a skeletal mesh wit
 
 `Ragdoll.Profile` is declared natively as the parent tag. Add your own profile tags under it, then add matching entries to `PhysicalProfiles`, e.g.:
 
-| Profile | Bone Groups | Overrides | OrientationStrength |
+| Profile | Bone Groups | Overrides | AngularStrength |
 | --- | --- | --- | --- |
-| `Ragdoll.Profile.Subtle` | `spine_01` | `clavicle_l`/`clavicle_r` disabled | 400 |
-| `Ragdoll.Profile.Flail` | `spine_01` | none | 30 |
+| `Ragdoll.Profile.Subtle` | `spine_01` | `clavicle_l`/`clavicle_r` disabled | 3.2 |
+| `Ragdoll.Profile.Flail` | `spine_01` | none | 0.9 |
 
-Leave `BlendWeight` at 1 and tune the feel with `OrientationStrength` (with `AngularVelocityStrength` around a tenth of it, as damping). `BlendWeight` is for fading the layer in and out.
+Leave `BlendWeight` at 1 and tune the feel with `AngularStrength` (with `AngularDampingRatio` near 1 for a settled body, lower for a looser one). `BlendWeight` is for fading the layer in and out.
 
 Two things will silently produce no visible effect:
 
 - **The mesh needs physics collision.** `USkeletalMeshComponent::ShouldBlendPhysicsBones()` returns false without it and the engine skips per-bone blending entirely, and `ACharacter`'s default `CharacterMesh` profile is query only. `bAutoEnablePhysicsCollision` handles this by upgrading the mesh while simulating and restoring it afterwards.
-- **Don't drive the physics asset's root body** (usually `pelvis`) in local simulation. Local simulation zeroes the linear drive, so the root body has nothing holding it in place and falls through the world. Start groups below it, or clear `bIsLocalSimulation` and set `PositionStrength`. The component logs a warning if a profile does this.
+- **Don't drive the physics asset's root body** (usually `pelvis`) in parent space. A parent space control needs a parent body to drive against, and the root body has none, so the group silently falls back to world space. Start groups below it, or set `ControlType` to `WorldSpace`. The component logs a warning if a profile does this.
 
 Then drive it from gameplay:
 

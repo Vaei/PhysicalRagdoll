@@ -14,6 +14,7 @@ public class PhysicalRagdoll : ModuleRules
 				"Core",
 				"GameplayTags",
 				"PhysicsCore",
+				"PhysicsControl",
 			}
 			);
 

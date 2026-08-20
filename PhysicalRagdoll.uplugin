@@ -13,6 +13,12 @@
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
 	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "PhysicsControl",
+			"Enabled": true
+		}
+	],
 	"Modules": [
 		{
 			"Name": "PhysicalRagdoll",

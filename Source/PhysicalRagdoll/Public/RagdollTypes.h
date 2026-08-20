@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "PhysicsEngine/PhysicalAnimationComponent.h"
+#include "PhysicsControlData.h"
 
 #include "RagdollTypes.generated.h"
 
@@ -97,16 +97,15 @@ struct PHYSICALRAGDOLL_API FRagdollBoneGroup
 
 	FRagdollBoneGroup()
 	{
-		PhysicalAnimData.bIsLocalSimulation = true;
-		PhysicalAnimData.OrientationStrength = 400.f;
-		PhysicalAnimData.AngularVelocityStrength = 40.f;
+		ControlData.AngularStrength = 3.2f;
+		ControlData.AngularDampingRatio = 1.f;
 	}
-	
-	FRagdollBoneGroup(FName InRootBone, bool bInIncludeRootBone = true, float InBlendWeight = 1.f, const FPhysicalAnimationData& InPhysicalAnimData = {})
+
+	FRagdollBoneGroup(FName InRootBone, bool bInIncludeRootBone = true, float InBlendWeight = 1.f, const FPhysicsControlData& InControlData = {})
 		: RootBone(InRootBone)
 		, bIncludeRootBone(bInIncludeRootBone)
 		, BlendWeight(InBlendWeight)
-		, PhysicalAnimData(InPhysicalAnimData)
+		, ControlData(InControlData)
 	{}
 
 	/** Bone at which this group starts */
@@ -121,16 +120,27 @@ struct PHYSICALRAGDOLL_API FRagdollBoneGroup
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", UIMax="1", ClampMin="0", ClampMax="1"))
 	float BlendWeight = 1.f;
 
-	/** Motor drive settings holding the group toward its animated pose */
+	/**
+	 * What each driven body is held relative to.
+	 *
+	 * ParentSpace drives a body against its physical parent, so the group holds its own shape and follows
+	 * wherever the animation carries the chain. WorldSpace drives every body against the world independently,
+	 * which resists being carried and is what a group needs when it has no parent body to hang off.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
-	FPhysicalAnimationData PhysicalAnimData;
+	EPhysicsControlType ControlType = EPhysicsControlType::ParentSpace;
+
+	/** Spring and damper settings holding the group toward its animated pose */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
+	FPhysicsControlData ControlData;
 
 	/**
-	 * Physical animation profile authored in the physics asset, driving this group in place of PhysicalAnimData.
-	 * Optional. Bodies the profile does not name are left undriven.
+	 * Constraint profile authored in the physics asset, whose joint drives initialize this group's strengths
+	 * in place of ControlData. Optional, and forces ParentSpace, since a joint drive is parent relative.
+	 * Bodies the profile does not name fall back to the physics asset's default constraint drives.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(GetOptions="GetPhysicalAnimationProfileOptions"))
-	FName PhysicalAnimationProfile = NAME_None;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(GetOptions="GetConstraintProfileOptions"))
+	FName ControlDataConstraintProfile = NAME_None;
 };
 
 /**
@@ -614,7 +624,7 @@ struct PHYSICALRAGDOLL_API FRagdollBaseDriveState
 /**
  * Keeps the cost of the physical layer proportional to how much anyone can actually see of it.
  *
- * Physical animation is per-body constraint solving, so a crowd of characters running it at full rate
+ * The physical layer is per-body constraint solving, so a crowd of characters running it at full rate
  * off screen is the obvious way for this to become the most expensive thing in a frame.
  *
  * None of it applies to a locally controlled pawn. That one is always on screen, always being studied,
@@ -686,10 +696,10 @@ struct PHYSICALRAGDOLL_API FRagdollSettings
 		: BlendIn(4.f, true)
 		, MotorDecay(2.f, true)
 	{
-		PhysicalAnimData.OrientationStrength = 100.f;
-		PhysicalAnimData.AngularVelocityStrength = 10.f;
-		PhysicalAnimData.PositionStrength = 100.f;
-		PhysicalAnimData.VelocityStrength = 10.f;
+		ControlData.AngularStrength = 1.6f;
+		ControlData.AngularDampingRatio = 0.5f;
+		ControlData.LinearStrength = 1.6f;
+		ControlData.LinearDampingRatio = 0.5f;
 	}
 
 	/** Bone at which to start simulation */
@@ -708,16 +718,21 @@ struct PHYSICALRAGDOLL_API FRagdollSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll)
 	FRagdollInterp MotorDecay;
 
-	/** Motor drive settings for simulated bodies */
+	/** What each simulated body is held relative to while the motors are still decaying */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll)
-	FPhysicalAnimationData PhysicalAnimData;
+	EPhysicsControlType ControlType = EPhysicsControlType::WorldSpace;
+
+	/** Spring and damper settings for simulated bodies */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll)
+	FPhysicsControlData ControlData;
 
 	/**
-	 * Physical animation profile authored in the physics asset, driving the simulated bodies in place of
-	 * PhysicalAnimData. Optional. The motors still decay to zero, so this shapes how the body gives up its pose.
+	 * Constraint profile authored in the physics asset, whose joint drives initialize the strengths in place
+	 * of ControlData. Optional, and forces ParentSpace. The strengths still decay to zero, so this shapes
+	 * how the body gives up its pose.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll, meta=(GetOptions="GetPhysicalAnimationProfileOptions"))
-	FName PhysicalAnimationProfile = NAME_None;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Ragdoll, meta=(GetOptions="GetConstraintProfileOptions"))
+	FName ControlDataConstraintProfile = NAME_None;
 
 	/**
 	 * Constraint profile authored in the physics asset, applied to every joint while ragdolling.

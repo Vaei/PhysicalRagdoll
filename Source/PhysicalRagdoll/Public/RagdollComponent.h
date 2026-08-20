@@ -10,8 +10,8 @@
 #include "RagdollComponent.generated.h"
 
 class ACharacter;
-class UPhysicalAnimationComponent;
 class UPhysicsAsset;
+class UPhysicsControlComponent;
 class USkeletalMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRagdollStateChanged, ERagdollState, OldState, ERagdollState, NewState);
@@ -19,7 +19,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPhysicalProfileChanged, FGamepla
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRagdollBlendComplete);
 
 /**
- * Drives a character's skeletal mesh through UPhysicalAnimationComponent.
+ * Drives a character's skeletal mesh through UPhysicsControlComponent.
  *
  * Physical: a persistent physics layer blended over otherwise regular animation, selected by named
  * profile so a character can run anything from subtle overlap to a full flail, and switch between
@@ -36,9 +36,9 @@ class PHYSICALRAGDOLL_API URagdollComponent : public UActorComponent
 	GENERATED_BODY()
 
 public:
-	/** Physical animation component created on the owner if it doesn't already have one */
+	/** Physics control component created on the owner if it doesn't already have one */
 	UPROPERTY(EditDefaultsOnly, Category="Ragdoll")
-	TSubclassOf<UPhysicalAnimationComponent> PhysicalAnimationComponentClass;
+	TSubclassOf<UPhysicsControlComponent> PhysicsControlComponentClass;
 
 	/** Levels of physicality that can be applied over regular animation */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(Categories="Ragdoll.Profile"))
@@ -60,26 +60,6 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical")
 	bool bQueryStateSuspension = false;
-
-	/**
-	 * Supply the linear restoring force that local simulation leaves out.
-	 *
-	 * With bIsLocalSimulation the engine deliberately zeroes the linear drive and keeps only the angular
-	 * one, so a body has nothing pulling it back to its target position. Any sustained bias then just
-	 * accelerates it until a joint limit catches it, and it stays there - the character straightens up,
-	 * further bias has no authority, and stopping never undoes it. This restores that missing half, so a
-	 * bias settles at an offset proportional to its strength and springs back when it goes away.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical")
-	bool bRestoreLinearDrift = false;
-
-	/** How hard a drifted body is pulled back toward its animated position */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(UIMin="0", EditCondition="bRestoreLinearDrift"))
-	float LinearRestoreStiffness = 15.f;
-
-	/** Damping on the drift, applied only along the drift itself so it cannot fight the animation */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(UIMin="0", EditCondition="bRestoreLinearDrift"))
-	float LinearRestoreDamping = 3.f;
 
 	/** Blend rate used by a Fast suspension, versus the profile's own rate for a normal one */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(UIMin="1", UIMax="40"))
@@ -342,9 +322,6 @@ public:
 	const UPhysicsAsset* GetEditorPhysicsAsset() const;
 
 	UFUNCTION()
-	TArray<FString> GetPhysicalAnimationProfileOptions() const;
-
-	UFUNCTION()
 	TArray<FString> GetConstraintProfileOptions() const;
 #endif
 
@@ -352,6 +329,24 @@ protected:
 	void SetState(ERagdollState NewState);
 	void CacheReferences();
 	bool HasValidPhysics() const;
+
+	/** Name the control and body modifier for a bone are registered under, so they can be found again */
+	static FName MakeOperatorName(FName BoneName);
+
+	/** Create the body modifier and, unless the bone is only fading out, the control that drives it */
+	void CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData, EPhysicsControlType ControlType, FName ConstraintProfile);
+
+	/** Ensure only the body modifier exists, so a bone dropped by a new profile can still fade out */
+	void EnsureBodyModifierForBone(FName BoneName);
+
+	void DestroyDriveForBone(FName BoneName);
+	void DestroyAllDrives();
+
+	/** Push one bone's blend weight to both the body modifier and the body itself */
+	void ApplyBoneWeight(FName BoneName, float Weight) const;
+
+	/** Scale every strength in the active set, which is how the layer ramps up and how ragdoll motors decay */
+	void ApplyStrengthMultiplier(float Multiplier) const;
 
 	// Physical layer
 	void SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhysicalProfile& Profile);
@@ -400,12 +395,6 @@ protected:
 	void ApplyConstraintProfile(FName ProfileName);
 	void RestoreConstraintProfile();
 
-	/** Drive settings a physics asset profile holds for a bone, or null when the bone has no body or the profile is not on it */
-	const FPhysicalAnimationData* FindPhysicalAnimationProfileData(FName BoneName, FName ProfileName) const;
-
-	/** Applying a profile the asset does not define is a silent no-op, leaving those bodies with no motor */
-	void WarnIfPhysicalAnimationProfileMissing(FName BoneName, FName ProfileName) const;
-
 	void EnsurePhysicsCollision();
 	void RestoreCollisionEnabled();
 	void WarnIfGroupUnanchored(const FRagdollBoneGroup& Group) const;
@@ -416,9 +405,9 @@ protected:
 	UPROPERTY(Transient)
 	ERagdollState CurrentState = ERagdollState::None;
 
-	/** Physical animation component on the same actor */
+	/** Physics control component on the same actor */
 	UPROPERTY(Transient, DuplicateTransient)
-	TObjectPtr<UPhysicalAnimationComponent> PhysicalAnimation;
+	TObjectPtr<UPhysicsControlComponent> PhysicsControl;
 
 	/** Cached skeletal mesh */
 	UPROPERTY(Transient, DuplicateTransient)
@@ -464,7 +453,7 @@ protected:
 	UPROPERTY(Transient)
 	float LODScale = 1.f;
 
-	/** Interpolated strength multiplier fed to the physical animation component */
+	/** Interpolated strength multiplier fed to the physics control component */
 	UPROPERTY(Transient)
 	float CurrentStrength = 0.f;
 
