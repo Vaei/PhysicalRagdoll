@@ -29,9 +29,9 @@ Switching profiles cross-fades every group, including groups that only exist in 
 A constant physics layer reads as a wobble. `URagdollStatics::CalculateMotionDrive` shapes it from the character's own movement so it reads as a body dealing with its momentum.
 
 ```cpp
-float Alpha, Strength;
-FVector Bias;
-URagdollStatics::CalculateMotionDriveForCharacter(MotionParams, MotionState, Character, DeltaTime, Alpha, Strength, Bias);
+float Alpha, Strength, BlendRate;
+FVector Bias, PushBias, TurnBias;
+URagdollStatics::CalculateMotionDriveForCharacter(MotionDriveParams, MotionDriveState, this, DeltaTime, Alpha, Strength, Bias, PushBias, TurnBias, BlendRate);
 Ragdoll->SetPhysicalAlpha(Alpha);
 Ragdoll->SetPhysicalStrength(Strength);
 Ragdoll->AddPhysicalBias(Bias);
