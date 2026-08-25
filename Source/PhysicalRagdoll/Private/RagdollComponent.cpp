@@ -47,6 +47,7 @@ namespace Ragdoll
 		TEXT("off; 1 puts back whatever each was running. Suspensions gameplay asked for are untouched."),
 		ECVF_Cheat);
 
+#if !UE_BUILD_SHIPPING
 	static TAutoConsoleVariable<int32> CVarRagdollDebugBodies(
 		TEXT("p.Ragdoll.DebugBodies"),
 		0,
@@ -59,6 +60,8 @@ namespace Ragdoll
 		TEXT("Draw the bias passed to AddPhysicalBias, and report when nothing is being applied"),
 		ECVF_Cheat);
 
+#endif
+
 	static TAutoConsoleVariable<bool> CVarRagdollAllowUnscopedPush(
 		TEXT("p.Ragdoll.AllowUnscopedPush"),
 		false,
@@ -67,6 +70,7 @@ namespace Ragdoll
 		TEXT("and reads as a body being shaken rather than leaning."),
 		ECVF_Default);
 
+#if !UE_BUILD_SHIPPING
 	static TAutoConsoleVariable<float> CVarRagdollTestBias(
 		TEXT("p.Ragdoll.TestBias"),
 		0.f,
@@ -103,6 +107,7 @@ namespace Ragdoll
 		CVarRagdollDebugMotion.AsVariable()->SetOnChangedCallback(OnChanged);
 		CVarRagdollTestBias.AsVariable()->SetOnChangedCallback(OnChanged);
 	}
+#endif
 }
 
 URagdollComponent::URagdollComponent(const FObjectInitializer& ObjectInitializer)
@@ -147,6 +152,7 @@ void URagdollComponent::BeginPlay()
 		return;
 	}
 
+#if !UE_BUILD_SHIPPING
 	Ragdoll::BindRagdollDebugCVarCallbacks();
 	DebugCVarChangedHandle = Ragdoll::GRagdollDebugCVarChanged.AddWeakLambda(this, [this]
 	{
@@ -157,6 +163,7 @@ void URagdollComponent::BeginPlay()
 			Wake();
 		}
 	});
+#endif
 
 	CacheReferences();
 	ApplyEnabledCVar();
@@ -169,8 +176,10 @@ void URagdollComponent::BeginPlay()
 
 void URagdollComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+#if !UE_BUILD_SHIPPING
 	Ragdoll::GRagdollDebugCVarChanged.Remove(DebugCVarChangedHandle);
 	DebugCVarChangedHandle.Reset();
+#endif
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -586,6 +595,7 @@ float URagdollComponent::GetBlendAlpha() const
 // Debug
 // ============================================================================
 
+#if !UE_BUILD_SHIPPING
 static URagdollComponent* FindDebugRagdollComponent(const UWorld* World)
 {
 	if (!World)
@@ -644,10 +654,11 @@ static FAutoConsoleCommandWithWorldAndArgs GDebugRagdollDumpBodiesCmd(
 			Comp->DebugDumpBodies();
 		}
 	}));
+#endif
 
+#if !UE_BUILD_SHIPPING
 void URagdollComponent::DrawMotionDebug() const
 {
-#if !UE_BUILD_SHIPPING
 	if (!Mesh || !GEngine)
 	{
 		return;
@@ -700,8 +711,8 @@ void URagdollComponent::DrawMotionDebug() const
 			DrawDebugString(GetWorld(), BoneLocation, TEXT("asleep"), nullptr, FColor::Red, 0.f, true, 1.f);
 		}
 	}
-#endif
 }
+#endif
 
 void URagdollComponent::DebugDumpBodies() const
 {
@@ -1551,7 +1562,9 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 	}
 	else
 	{
+#if !UE_BUILD_SHIPPING
 		bLoggedConvergedBodies = false;
+#endif
 	}
 }
 

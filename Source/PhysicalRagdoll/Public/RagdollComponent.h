@@ -318,8 +318,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Ragdoll|Debug", meta=(DevelopmentOnly))
 	void DebugDumpBodies() const;
 
+#if !UE_BUILD_SHIPPING
 	/** Draw the bias reaching AddPhysicalBias. Console command: p.Ragdoll.DebugMotion */
 	void DrawMotionDebug() const;
+#endif
 
 #if WITH_EDITOR
 	/** Physics asset the profile dropdowns list from, resolved from the owner or, in the Blueprint editor, from the class default */
@@ -477,7 +479,9 @@ protected:
 
 	bool bRagdollBlendComplete = false;
 
+#if !UE_BUILD_SHIPPING
 	bool bLoggedConvergedBodies = false;
+#endif
 
 	bool bWarnedUnscopedPush = false;
 
@@ -491,10 +495,12 @@ protected:
 	 */
 	uint64 LastBiasFrame = 0;
 
+#if !UE_BUILD_SHIPPING
 	/** Last bias handed to AddPhysicalBias, for the motion debug */
 	FVector LastAppliedBias = FVector::ZeroVector;
 	TArray<FVector> LastBiasOrigins;
 	FDelegateHandle DebugCVarChangedHandle;
+#endif
 
 	/** Whether we changed the collision profile on the mesh */
 	bool bCollisionProfileChanged = false;
