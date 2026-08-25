@@ -36,14 +36,11 @@ Add a `URagdollComponent` to your character. The owner needs a skeletal mesh wit
 
 ### 2. Add a profile
 
-`Ragdoll.Profile` is declared natively as the parent tag. Add your own tags under it, then add matching entries to `PhysicalProfiles`, e.g.:
+`PhysicalProfiles` already ships one entry under the natively declared `Ragdoll.Profile`, set up as a working always-on layer. Assign it to `AutoPhysicalProfile` and you have something on screen.
 
-| Profile | Bone Groups | Overrides | AngularStrength |
-| --- | --- | --- | --- |
-| `Ragdoll.Profile.Subtle` | `spine_01` | `clavicle_l`/`clavicle_r` disabled | 3.2 |
-| `Ragdoll.Profile.Flail` | `spine_01` | none | 0.9 |
+It is a single `spine_01` group in world space, `StrengthMultiplier` 2, `BlendWeight` 0.6, `AngularStrength` 3.2 with `AngularDampingRatio` 0.25, `LinearStrength` 0.36 with `LinearDampingRatio` 1.1. On top of that, `spine_05` and `neck_01` are scaled down to 0.35 and 0.2 so the head does not swim, and the forearms are disabled outright so the hands hold still.
 
-Assign `AutoPhysicalProfile` to apply one on BeginPlay, or drive it from gameplay:
+Add your own tags under `Ragdoll.Profile` and copy that entry as the starting point for each. Switch between them from gameplay:
 
 ```cpp
 Ragdoll->SetPhysicalProfile(SubtleTag);     // hold a subtle overlap
