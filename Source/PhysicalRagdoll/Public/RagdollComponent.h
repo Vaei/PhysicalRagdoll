@@ -340,13 +340,13 @@ protected:
 	static FName MakeOperatorName(FName BoneName);
 
 	/** Create the body modifier and, unless the bone is only fading out, the control that drives it */
-	void CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData, EPhysicsControlType ControlType, FName ConstraintProfile);
+	void CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData, EPhysicsControlType ControlType, FName ConstraintProfile) const;
 
 	/** Ensure only the body modifier exists, so a bone dropped by a new profile can still fade out */
-	void EnsureBodyModifierForBone(FName BoneName);
+	void EnsureBodyModifierForBone(FName BoneName) const;
 
-	void DestroyDriveForBone(FName BoneName);
-	void DestroyAllDrives();
+	void DestroyDriveForBone(FName BoneName) const;
+	void DestroyAllDrives() const;
 
 	/**
 	 * Whether a push with no bone may cover every group the profile drives. Off unless

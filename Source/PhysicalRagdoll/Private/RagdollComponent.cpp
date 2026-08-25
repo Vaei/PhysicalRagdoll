@@ -1018,7 +1018,7 @@ FName URagdollComponent::MakeOperatorName(FName BoneName)
 	return FName(*(TEXT("Ragdoll_") + BoneName.ToString()));
 }
 
-void URagdollComponent::EnsureBodyModifierForBone(FName BoneName)
+void URagdollComponent::EnsureBodyModifierForBone(FName BoneName) const
 {
 	const FName Name = MakeOperatorName(BoneName);
 	if (PhysicsControl->GetBodyModifierExists(Name))
@@ -1043,7 +1043,7 @@ void URagdollComponent::EnsureBodyModifierForBone(FName BoneName)
 }
 
 void URagdollComponent::CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData,
-	EPhysicsControlType ControlType, FName ConstraintProfile)
+	EPhysicsControlType ControlType, FName ConstraintProfile) const
 {
 	EnsureBodyModifierForBone(BoneName);
 
@@ -1079,7 +1079,7 @@ void URagdollComponent::CreateDriveForBone(FName BoneName, const FPhysicsControl
 		Data, FPhysicsControlTarget(), GRagdollOperatorSet);
 }
 
-void URagdollComponent::DestroyDriveForBone(FName BoneName)
+void URagdollComponent::DestroyDriveForBone(FName BoneName) const
 {
 	if (!PhysicsControl)
 	{
@@ -1097,7 +1097,7 @@ void URagdollComponent::DestroyDriveForBone(FName BoneName)
 	}
 }
 
-void URagdollComponent::DestroyAllDrives()
+void URagdollComponent::DestroyAllDrives() const
 {
 	if (!PhysicsControl)
 	{
