@@ -38,9 +38,6 @@ Ragdoll->SetPhysicalStrength(Strength);
 Ragdoll->AddPhysicalBias(SpecificBiasBone, Bias * Alpha, HeightOffset);  // spine_03, 20.f height offset - starting values for you
 ```
 
-> [!WARNING]
-> You will very likely have poor results immediately due to `MaxBias` on the `MotionDriveParams`; this needs to be tuned to suit your project's movement, if the default `4000.f` is too high then try `1200.f` and go from there.
-
 Speed scales the whole layer, through a curve or a plain range - a character standing still barely moves, one at a sprint carries full physicality.
 
 The rest comes from acceleration, split relative to the direction of travel, because the three cases read as different things on a body and want separate scales:
@@ -59,29 +56,6 @@ Two things keep this from looking floppy:
 - `MaxBias` caps it. Uncapped, a hard direction change produces an acceleration spike that throws the whole upper body.
 
 `AddPhysicalBias` applies for one frame only, so it has to be called every frame to sustain a lean. The bone scopes it, covering everything below that bone. `None` covers every group the active profile drives, which puts the push through the arms and legs as well and reads as a body being shaken rather than leaning, so it is refused and warned about unless `p.Ragdoll.AllowUnscopedPush` is set. `AddPhysicalTorque` follows the same rule.
-
-#### Example Motion Drive
-
-This is what my example project did:
-```cpp
-static constexpr float BrakingStrengthScale = 3.f;
-static constexpr float BrakingRateScale = 5.f;
-static constexpr float BiasHeightOffset = 20.f;
-static const FName BiasBoneName(TEXT("spine_03"));
-
-const bool bHasInput = GetCharacterMovement() && GetCharacterMovement()->GetCurrentAcceleration().Size2D() > 1.f;
-const float StrengthScale = bHasInput ? 1.f : BrakingStrengthScale;
-const float BlendRateScale = bHasInput ? 1.f : BrakingRateScale;
-
-float MotionAlpha, MotionStrength, BlendRate;
-FVector MotionBias, PushBias, TurnBias;
-URagdollStatics::CalculateMotionDriveForCharacter(Ragdoll->MotionDriveParams, Ragdoll->MotionDriveState,
-	this, DeltaTime, MotionAlpha, MotionStrength, MotionBias, PushBias, TurnBias, BlendRate);
-
-Ragdoll->SetPhysicalStrength(MotionStrength * StrengthScale);
-Ragdoll->SetPhysicalBlendRate(BlendRate * BlendRateScale);
-Ragdoll->AddPhysicalBias(MotionBias * MotionAlpha, BiasBoneName, BiasHeightOffset);
-```
 
 ### Bone Delta Drive
 
@@ -204,7 +178,30 @@ Then in your character's tick from either C++ or BP:
 
 <img width="1403" height="717" alt="UnrealEditor-Win64-DebugGame_2026-08-17_10-46-11" src="https://github.com/user-attachments/assets/a7df52e2-c71f-447c-b8ec-1a0b331e4ea1" />
 
+```cpp
+static constexpr float BrakingStrengthScale = 3.f;
+static constexpr float BrakingRateScale = 5.f;
+static constexpr float BiasHeightOffset = 20.f;
+static const FName BiasBoneName(TEXT("spine_03"));
+
+const bool bHasInput = GetCharacterMovement() && GetCharacterMovement()->GetCurrentAcceleration().Size2D() > 1.f;
+const float StrengthScale = bHasInput ? 1.f : BrakingStrengthScale;
+const float BlendRateScale = bHasInput ? 1.f : BrakingRateScale;
+
+float MotionAlpha, MotionStrength, BlendRate;
+FVector MotionBias, PushBias, TurnBias;
+URagdollStatics::CalculateMotionDriveForCharacter(Ragdoll->MotionDriveParams, Ragdoll->MotionDriveState,
+	this, DeltaTime, MotionAlpha, MotionStrength, MotionBias, PushBias, TurnBias, BlendRate);
+
+Ragdoll->SetPhysicalStrength(MotionStrength * StrengthScale);
+Ragdoll->SetPhysicalBlendRate(BlendRate * BlendRateScale);
+Ragdoll->AddPhysicalBias(MotionBias * MotionAlpha, BiasBoneName, BiasHeightOffset);
+```
+
 Test, then tune from there.
+
+> [!WARNING]
+> You will very likely have poor results immediately due to `MaxBias` on the `MotionDriveParams`; this needs to be tuned to suit your project's movement, if the default `4000.f` is too high then try `1200.f` and go from there.
 
 ### Console Commands
 
