@@ -191,10 +191,6 @@ All optional. `ProfileSourcePhysicsAsset` feeds the dropdowns when there is no o
 
 `LOD` scales the layer down with distance and visibility. It never applies to a locally controlled pawn.
 
-### Sharing the physics control component
-
-Controls and body modifiers are named `Ragdoll_<Bone>` in the set `Ragdoll`, so anything else on the same `UPhysicsControlComponent` is untouched.
-
 ## Changelog
 
 ### 1.0.0
