@@ -38,6 +38,9 @@ Ragdoll->SetPhysicalStrength(Strength);
 Ragdoll->AddPhysicalBias(SpecificBiasBone, Bias * Alpha, HeightOffset);  // spine_03, 20.f height offset - starting values for you
 ```
 
+> [!WARNING]
+> You will very likely have poor results immediately due to `MaxBias` on the `MotionDriveParams`; this needs to be tuned to suit your project's movement, if the default `4000.f` is too high then try `1200.f` and go from there.
+
 Speed scales the whole layer, through a curve or a plain range - a character standing still barely moves, one at a sprint carries full physicality.
 
 The rest comes from acceleration, split relative to the direction of travel, because the three cases read as different things on a body and want separate scales:
