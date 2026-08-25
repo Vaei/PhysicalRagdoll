@@ -245,7 +245,17 @@ void URagdollComponent::TickStateSuspension()
 
 bool URagdollComponent::IsRagdollRunnable() const
 {
-	return GetNetMode() != NM_DedicatedServer && Ragdoll::CVarRagdollEnable.GetValueOnGameThread() > 0;
+	if (IsRunningDedicatedServer() || GetNetMode() == NM_DedicatedServer)
+	{
+		return false;
+	}
+	
+	if (Ragdoll::CVarRagdollEnable.GetValueOnGameThread() <= 0)
+	{
+		return false;
+	}
+	
+	return true;
 }
 
 void URagdollComponent::ApplyEnabledCVar()
