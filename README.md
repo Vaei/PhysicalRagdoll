@@ -35,7 +35,7 @@ URagdollStatics::CalculateMotionDriveForCharacter(MotionDriveParams, MotionDrive
 	Alpha, Strength, Bias, PushBias, TurnBias, BlendRate);
 Ragdoll->SetPhysicalAlpha(Alpha);
 Ragdoll->SetPhysicalStrength(Strength);
-Ragdoll->AddPhysicalBias(Bias);
+Ragdoll->AddPhysicalBias(SpecificBiasBone, Bias * Alpha, HeightOffset);  // spine_03, 20.f height offset - starting values for you
 ```
 
 Speed scales the whole layer, through a curve or a plain range - a character standing still barely moves, one at a sprint carries full physicality.
