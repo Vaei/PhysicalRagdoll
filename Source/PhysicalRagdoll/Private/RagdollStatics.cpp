@@ -13,6 +13,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RagdollStatics)
 
 static TAutoConsoleVariable<int32> CVarRagdollDebugMotionDrive(
@@ -59,6 +61,8 @@ FName URagdollStatics::GetBoneName(const USkeletalMeshComponent* Mesh, const FBo
 int32 URagdollStatics::ForEach(const USkeletalMeshComponent* Mesh, FName BoneName, bool bIncludeSelf,
 	const TFunctionRef<bool(FBodyInstance*)>& Func)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::ForEach);
+
 	if (!Mesh)
 	{
 		return 0;
@@ -136,6 +140,8 @@ bool URagdollStatics::SetBlendWeight(const USkeletalMeshComponent* Mesh, const F
 
 void URagdollStatics::FinalizeMeshPhysics(USkeletalMeshComponent* Mesh)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::FinalizeMeshPhysics);
+
 	if (!Mesh)
 	{
 		return;
@@ -160,6 +166,8 @@ float URagdollStatics::GetBoneBlendWeight(const USkeletalMeshComponent* Mesh, co
 
 FRagdollMotionInput URagdollStatics::MakeMotionInputFromCharacter(const ACharacter* Character)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::MakeMotionInputFromCharacter);
+
 	FRagdollMotionInput Input;
 
 	if (const UCharacterMovementComponent* CMC = Character ? Character->GetCharacterMovement() : nullptr)
@@ -210,6 +218,8 @@ void URagdollStatics::CalculateMotionDrive(const FRagdollMotionDrive& Params, FR
 	FVector& OutPushBias, FVector& OutTurnBias, float& OutBlendRate,
 	float AccelerationMultiplier, float BrakingMultiplier)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::CalculateMotionDrive);
+
 	ON_SCOPE_EXIT
 	{
 		OutAlpha = State.Alpha;
@@ -375,6 +385,8 @@ void URagdollStatics::CalculateMotionDriveForCharacter(const FRagdollMotionDrive
 	FVector& OutPushBias, FVector& OutTurnBias, float& OutBlendRate,
 	float AccelerationMultiplier, float BrakingMultiplier)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::CalculateMotionDriveForCharacter);
+
 	CalculateMotionDrive(Params, State, MakeMotionInputFromCharacter(Character), DeltaTime,
 		OutAlpha, OutStrength, OutBias, OutPushBias, OutTurnBias, OutBlendRate,
 		AccelerationMultiplier, BrakingMultiplier);
@@ -420,6 +432,8 @@ void URagdollStatics::CalculateBaseDrive(const FRagdollBaseDrive& Params, FRagdo
 	UPrimitiveComponent* BaseComponent, const ACharacter* Character, float DeltaTime,
 	FVector& OutBias, FVector& OutTorque)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::CalculateBaseDrive);
+
 	ON_SCOPE_EXIT
 	{
 		OutBias = State.Bias;
@@ -477,6 +491,8 @@ void URagdollStatics::CalculateBaseDrive(const FRagdollBaseDrive& Params, FRagdo
 void URagdollStatics::CalculateBoneDeltaDrive(const FRagdollBoneDeltaDrive& Params, FRagdollBoneDeltaDriveState& State,
 	const USkeletalMeshComponent* Mesh, float DeltaTime, float& OutAlpha)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::CalculateBoneDeltaDrive);
+
 	ON_SCOPE_EXIT
 	{
 		OutAlpha = State.Alpha;
@@ -532,6 +548,8 @@ void URagdollStatics::CalculateBoneDeltaDrive(const FRagdollBoneDeltaDrive& Para
 
 ECollisionEnabled::Type URagdollStatics::EnablePhysicsCollision(USkeletalMeshComponent* Mesh)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::EnablePhysicsCollision);
+
 	const ECollisionEnabled::Type Previous = Mesh->GetCollisionEnabled();
 
 	switch (Previous)

@@ -31,6 +31,8 @@
 #include "Engine/SimpleConstructionScript.h"
 #endif
 
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RagdollComponent)
 
 static constexpr float GRagdollWeightTolerance = 0.001f;
@@ -145,6 +147,8 @@ URagdollComponent::URagdollComponent(const FObjectInitializer& ObjectInitializer
 
 void URagdollComponent::BeginPlay()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::BeginPlay);
+
 	Super::BeginPlay();
 
 	if (GetNetMode() == NM_DedicatedServer)
@@ -176,6 +180,8 @@ void URagdollComponent::BeginPlay()
 
 void URagdollComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::EndPlay);
+
 #if !UE_BUILD_SHIPPING
 	Ragdoll::GRagdollDebugCVarChanged.Remove(DebugCVarChangedHandle);
 	DebugCVarChangedHandle.Reset();
@@ -187,6 +193,8 @@ void URagdollComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void URagdollComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TickComponent);
+
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	if (bQueryStateSuspension)
@@ -223,6 +231,8 @@ bool URagdollComponent::ShouldSuspendPhysicalLayer_Implementation(ERagdollSuspen
 
 void URagdollComponent::TickStateSuspension()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TickStateSuspension);
+
 	ERagdollSuspendUrgency Urgency = ERagdollSuspendUrgency::Blend;
 	const bool bShouldSuspend = ShouldSuspendPhysicalLayer(Urgency);
 
@@ -274,6 +284,8 @@ void URagdollComponent::ApplyEnabledCVar()
 
 float URagdollComponent::CalculateLODScale() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::CalculateLODScale);
+
 	if (!Mesh)
 	{
 		return 0.f;
@@ -339,6 +351,8 @@ ERagdollSuspendUrgency URagdollComponent::GetSuspendUrgency() const
 
 void URagdollComponent::SuspendPhysicalLayer(FGameplayTag Reason, ERagdollSuspendUrgency Urgency)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SuspendPhysicalLayer);
+
 	if (!Reason.IsValid())
 	{
 		return;
@@ -363,6 +377,8 @@ void URagdollComponent::SuspendPhysicalLayer(FGameplayTag Reason, ERagdollSuspen
 
 void URagdollComponent::ResumePhysicalLayer(FGameplayTag Reason)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ResumePhysicalLayer);
+
 	if (SuspendReasons.Remove(Reason) == 0 || SuspendReasons.Num() > 0)
 	{
 		return;
@@ -374,6 +390,8 @@ void URagdollComponent::ResumePhysicalLayer(FGameplayTag Reason)
 
 void URagdollComponent::ResumePhysicalLayerAll()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ResumePhysicalLayerAll);
+
 	if (SuspendReasons.Num() == 0)
 	{
 		return;
@@ -386,6 +404,8 @@ void URagdollComponent::ResumePhysicalLayerAll()
 
 void URagdollComponent::SuspendImmediately()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SuspendImmediately);
+
 	if (CurrentState != ERagdollState::Physical)
 	{
 		return;
@@ -401,6 +421,8 @@ void URagdollComponent::SuspendImmediately()
 
 void URagdollComponent::SetPhysicalProfile(FGameplayTag ProfileTag)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetPhysicalProfile);
+
 	if (!IsRagdollRunnable())
 	{
 		return;
@@ -432,11 +454,15 @@ void URagdollComponent::SetPhysicalProfile(FGameplayTag ProfileTag)
 
 void URagdollComponent::SetPhysicalProfileWithSettings(FGameplayTag ProfileTag, const FRagdollPhysicalProfile& Profile)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetPhysicalProfileWithSettings);
+
 	SetupPhysical(ProfileTag, Profile);
 }
 
 void URagdollComponent::ClearPhysicalProfile()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ClearPhysicalProfile);
+
 	if (CurrentState == ERagdollState::Ragdoll || CurrentState == ERagdollState::Recovery)
 	{
 		PendingProfileTag = FGameplayTag::EmptyTag;
@@ -516,6 +542,8 @@ float URagdollComponent::GetPhysicalBlendRate() const
 
 void URagdollComponent::RagdollDeath(FVector Impulse)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::RagdollDeath);
+
 	if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
 	{
 		if (UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
@@ -540,12 +568,16 @@ void URagdollComponent::StartRagdoll(FVector Impulse)
 
 void URagdollComponent::StartRagdollWithSettings(const FRagdollSettings& Settings, FVector Impulse)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::StartRagdollWithSettings);
+
 	RagdollSettings = Settings;
 	SetupRagdoll(Impulse);
 }
 
 void URagdollComponent::StopRagdoll()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::StopRagdoll);
+
 	if (CurrentState != ERagdollState::Ragdoll)
 	{
 		return;
@@ -562,11 +594,15 @@ void URagdollComponent::StopRagdoll()
 
 void URagdollComponent::StartRecovery()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::StartRecovery);
+
 	SetupRecovery();
 }
 
 void URagdollComponent::StopRecovery()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::StopRecovery);
+
 	if (CurrentState != ERagdollState::Recovery)
 	{
 		return;
@@ -918,6 +954,8 @@ TArray<FString> URagdollComponent::GetConstraintProfileOptions() const
 
 void URagdollComponent::SetState(ERagdollState NewState)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetState);
+
 	if (CurrentState == NewState)
 	{
 		return;
@@ -959,6 +997,8 @@ void URagdollComponent::SetState(ERagdollState NewState)
 
 void URagdollComponent::CacheReferences()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::CacheReferences);
+
 	AActor* Owner = GetOwner();
 	if (!Owner)
 	{
@@ -1020,6 +1060,8 @@ FName URagdollComponent::MakeOperatorName(FName BoneName)
 
 void URagdollComponent::EnsureBodyModifierForBone(FName BoneName) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::EnsureBodyModifierForBone);
+
 	const FName Name = MakeOperatorName(BoneName);
 	if (PhysicsControl->GetBodyModifierExists(Name))
 	{
@@ -1045,6 +1087,8 @@ void URagdollComponent::EnsureBodyModifierForBone(FName BoneName) const
 void URagdollComponent::CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData,
 	EPhysicsControlType ControlType, FName ConstraintProfile) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::CreateDriveForBone);
+
 	EnsureBodyModifierForBone(BoneName);
 
 	const FName Name = MakeOperatorName(BoneName);
@@ -1081,6 +1125,8 @@ void URagdollComponent::CreateDriveForBone(FName BoneName, const FPhysicsControl
 
 void URagdollComponent::DestroyDriveForBone(FName BoneName) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::DestroyDriveForBone);
+
 	if (!PhysicsControl)
 	{
 		return;
@@ -1099,6 +1145,8 @@ void URagdollComponent::DestroyDriveForBone(FName BoneName) const
 
 void URagdollComponent::DestroyAllDrives() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::DestroyAllDrives);
+
 	if (!PhysicsControl)
 	{
 		return;
@@ -1131,6 +1179,8 @@ void URagdollComponent::ApplyBoneWeight(FName BoneName, float Weight) const
 
 void URagdollComponent::ApplyStrengthMultiplier(float Multiplier) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ApplyStrengthMultiplier);
+
 	// Addressing an empty set logs a warning, and a profile with no groups is legitimate
 	if (PhysicsControl->GetControlNamesInSet(GRagdollOperatorSet).IsEmpty())
 	{
@@ -1150,6 +1200,8 @@ void URagdollComponent::ApplyStrengthMultiplier(float Multiplier) const
 
 void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhysicalProfile& Profile)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetupPhysical);
+
 	if (!IsRagdollRunnable())
 	{
 		return;
@@ -1238,6 +1290,8 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 
 void URagdollComponent::TeardownPhysical()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TeardownPhysical);
+
 	if (Mesh)
 	{
 		for (const TPair<FName, float>& Pair : BoneWeights)
@@ -1257,6 +1311,8 @@ void URagdollComponent::TeardownPhysical()
 
 void URagdollComponent::ResolveBoneOverrides()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ResolveBoneOverrides);
+
 	ResolvedBoneOverrides.Reset();
 
 	for (const FRagdollBoneOverride& Override : ActiveProfile.BoneOverrides)
@@ -1281,6 +1337,8 @@ void URagdollComponent::ResolveBoneOverrides()
 
 void URagdollComponent::GatherTargetWeights(TMap<FName, float>& OutTargets) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::GatherTargetWeights);
+
 	for (const FRagdollBoneGroup& Group : ActiveProfile.BoneGroups)
 	{
 		const float GroupWeight = FMath::Clamp(Group.BlendWeight * PhysicalAlpha * LODScale, 0.f, 1.f);
@@ -1324,6 +1382,8 @@ bool URagdollComponent::AllowUnscopedPush(const TCHAR* FunctionName)
 
 void URagdollComponent::AddPhysicalBias(FVector Bias, FName BoneName, float HeightOffset)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::AddPhysicalBias);
+
 	if (!IsRagdollRunnable())
 	{
 		return;
@@ -1389,6 +1449,8 @@ void URagdollComponent::AddPhysicalBias(FVector Bias, FName BoneName, float Heig
 
 void URagdollComponent::AddPhysicalTorque(FVector Torque, FName BoneName)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::AddPhysicalTorque);
+
 	if (BoneName == NAME_None && !AllowUnscopedPush(TEXT("AddPhysicalTorque")))
 	{
 		return;
@@ -1446,6 +1508,8 @@ void URagdollComponent::WakeBodiesBelow(FName BoneName, bool bIncludeSelf) const
 
 void URagdollComponent::TickPhysical(float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TickPhysical);
+
 	if (!HasValidPhysics())
 	{
 		TeardownPhysical();
@@ -1580,6 +1644,8 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 
 void URagdollComponent::ApplyPendingPhysicalProfile()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ApplyPendingPhysicalProfile);
+
 	if (!PendingProfileTag.IsValid())
 	{
 		return;
@@ -1596,6 +1662,8 @@ void URagdollComponent::ApplyPendingPhysicalProfile()
 
 void URagdollComponent::SetupRagdoll(const FVector& Impulse)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetupRagdoll);
+
 	if (!IsRagdollRunnable())
 	{
 		return;
@@ -1693,6 +1761,8 @@ void URagdollComponent::SetupRagdoll(const FVector& Impulse)
 
 void URagdollComponent::TeardownRagdoll()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TeardownRagdoll);
+
 	// Bone positions are still valid, so place the capsule before the simulation stops
 	UpdateCapsuleToFollowMesh();
 
@@ -1713,6 +1783,8 @@ void URagdollComponent::TeardownRagdoll()
 
 void URagdollComponent::TickRagdoll(float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TickRagdoll);
+
 	if (!HasValidPhysics())
 	{
 		StopRagdoll();
@@ -1748,6 +1820,8 @@ void URagdollComponent::TickRagdoll(float DeltaTime)
 
 void URagdollComponent::SetupRecovery()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetupRecovery);
+
 	if (CurrentState != ERagdollState::Ragdoll)
 	{
 		return;
@@ -1843,6 +1917,8 @@ void URagdollComponent::SetupRecovery()
 
 void URagdollComponent::TeardownRecovery()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TeardownRecovery);
+
 	if (ActiveRecoveryMontage && Mesh)
 	{
 		if (UAnimInstance* AnimInstance = Mesh->GetAnimInstance())
@@ -1867,6 +1943,8 @@ void URagdollComponent::TeardownRecovery()
 
 void URagdollComponent::TickRecovery(float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TickRecovery);
+
 	if (!Mesh)
 	{
 		ActiveRecoveryMontage = nullptr;
@@ -1939,6 +2017,8 @@ void URagdollComponent::OnRecoveryTimerExpired()
 
 void URagdollComponent::FinishRecovery()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::FinishRecovery);
+
 	FinalizeRecoveryTransform();
 	RecoveryAlpha = 0.f;
 	SetState(ERagdollState::None);
@@ -1947,6 +2027,8 @@ void URagdollComponent::FinishRecovery()
 
 void URagdollComponent::FinalizeRecoveryTransform() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::FinalizeRecoveryTransform);
+
 	if (!Mesh)
 	{
 		return;
@@ -2009,6 +2091,8 @@ void URagdollComponent::GetActiveSeparatedBones(TArray<FRagdollSeparatedBone>& O
 
 void URagdollComponent::UpdateCapsuleToFollowMesh() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::UpdateCapsuleToFollowMesh);
+
 	ACharacter* Character = Cast<ACharacter>(GetOwner());
 	if (!Mesh || !Character)
 	{
@@ -2033,6 +2117,8 @@ void URagdollComponent::UpdateCapsuleToFollowMesh() const
 
 void URagdollComponent::SnapMeshToCapsule() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SnapMeshToCapsule);
+
 	const ACharacter* Character = Cast<ACharacter>(GetOwner());
 	if (!Mesh || !Character)
 	{
@@ -2057,6 +2143,8 @@ void URagdollComponent::SnapMeshToCapsule() const
 
 void URagdollComponent::ApplySimulationCollisionProfile()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ApplySimulationCollisionProfile);
+
 	if (!Mesh || SimulationCollisionProfile == NAME_None)
 	{
 		return;
@@ -2073,6 +2161,8 @@ void URagdollComponent::ApplySimulationCollisionProfile()
 
 void URagdollComponent::RestoreCollisionProfile()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::RestoreCollisionProfile);
+
 	if (!bCollisionProfileChanged || !Mesh)
 	{
 		return;
@@ -2093,6 +2183,8 @@ void URagdollComponent::RestoreCollisionProfile()
 
 void URagdollComponent::ApplyConstraintProfile(FName ProfileName)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ApplyConstraintProfile);
+
 	if (!Mesh)
 	{
 		return;
@@ -2110,6 +2202,8 @@ void URagdollComponent::ApplyConstraintProfile(FName ProfileName)
 
 void URagdollComponent::RestoreConstraintProfile()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::RestoreConstraintProfile);
+
 	if (!bConstraintProfileChanged)
 	{
 		return;
@@ -2125,6 +2219,8 @@ void URagdollComponent::RestoreConstraintProfile()
 
 void URagdollComponent::EnsurePhysicsCollision()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::EnsurePhysicsCollision);
+
 	if (!bAutoEnablePhysicsCollision || !Mesh)
 	{
 		return;
@@ -2151,6 +2247,8 @@ void URagdollComponent::EnsurePhysicsCollision()
 
 void URagdollComponent::RestoreCollisionEnabled()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::RestoreCollisionEnabled);
+
 	if (!bCollisionEnabledChanged)
 	{
 		return;
@@ -2167,6 +2265,8 @@ void URagdollComponent::RestoreCollisionEnabled()
 
 void URagdollComponent::WarnIfGroupUnanchored(const FRagdollBoneGroup& Group) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::WarnIfGroupUnanchored);
+
 	if (!Group.bIncludeRootBone || !Mesh)
 	{
 		return;
