@@ -57,6 +57,29 @@ Two things keep this from looking floppy:
 
 `AddPhysicalBias` applies for one frame only, so it has to be called every frame to sustain a lean. It takes an optional bone to scope the lean to part of the body; with none it covers the active profile's groups.
 
+#### Example Motion Drive
+
+This is what my example project did:
+```cpp
+static constexpr float BrakingStrengthScale = 3.f;
+static constexpr float BrakingRateScale = 5.f;
+static constexpr float BiasHeightOffset = 20.f;
+static const FName BiasBoneName(TEXT("spine_03"));
+
+const bool bHasInput = GetCharacterMovement() && GetCharacterMovement()->GetCurrentAcceleration().Size2D() > 1.f;
+const float StrengthScale = bHasInput ? 1.f : BrakingStrengthScale;
+const float BlendRateScale = bHasInput ? 1.f : BrakingRateScale;
+
+float MotionAlpha, MotionStrength, BlendRate;
+FVector MotionBias, PushBias, TurnBias;
+URagdollStatics::CalculateMotionDriveForCharacter(Ragdoll->MotionDriveParams, Ragdoll->MotionDriveState,
+	this, DeltaTime, MotionAlpha, MotionStrength, MotionBias, PushBias, TurnBias, BlendRate);
+
+Ragdoll->SetPhysicalStrength(MotionStrength * StrengthScale);
+Ragdoll->SetPhysicalBlendRate(BlendRate * BlendRateScale);
+Ragdoll->AddPhysicalBias(MotionBias * MotionAlpha, BiasBoneName, BiasHeightOffset);
+```
+
 ### Bone Delta Drive
 
 `URagdollStatics::CalculateBoneDeltaDrive` is a second way to scale the layer, measuring how fast the animation is moving a reference bone instead of how fast the capsule is moving.
