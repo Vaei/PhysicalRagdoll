@@ -58,7 +58,7 @@ Two things keep this from looking floppy:
 - The bias is applied as a **mass-normalised acceleration** (`bAccelChange`), so a hand leans by exactly as much as a torso. Applying it as force instead is what flings light bones around and reads as silly.
 - `MaxBias` caps it. Uncapped, a hard direction change produces an acceleration spike that throws the whole upper body.
 
-`AddPhysicalBias` applies for one frame only, so it has to be called every frame to sustain a lean. It takes an optional bone to scope the lean to part of the body; with none it covers the active profile's groups.
+`AddPhysicalBias` applies for one frame only, so it has to be called every frame to sustain a lean. The bone scopes it, covering everything below that bone. `None` covers every group the active profile drives, which puts the push through the arms and legs as well and reads as a body being shaken rather than leaning, so it is refused and warned about unless `p.Ragdoll.AllowUnscopedPush` is set. `AddPhysicalTorque` follows the same rule.
 
 #### Example Motion Drive
 
@@ -213,6 +213,7 @@ Test, then tune from there.
 | `p.Ragdoll.Death` | Toggle ragdoll and recovery on the player's character |
 | `p.Ragdoll.Profile <Tag>` | Apply a physical profile by tag. No argument clears it. |
 | `p.Ragdoll.DumpBodies` | Log every body's simulation state and blend weight |
+| `p.Ragdoll.AllowUnscopedPush` | Allow `AddPhysicalBias` / `AddPhysicalTorque` with no bone. Off by default. |
 
 ## Changelog
 

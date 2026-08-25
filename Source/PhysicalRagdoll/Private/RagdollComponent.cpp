@@ -59,6 +59,14 @@ namespace Ragdoll
 		TEXT("Draw the bias passed to AddPhysicalBias, and report when nothing is being applied"),
 		ECVF_Cheat);
 
+	static TAutoConsoleVariable<bool> CVarRagdollAllowUnscopedPush(
+		TEXT("p.Ragdoll.AllowUnscopedPush"),
+		false,
+		TEXT("Allow AddPhysicalBias and AddPhysicalTorque to be called with no bone, covering every group the\n")
+		TEXT("active profile drives. Off by default: an unscoped push goes through the arms and legs as well,\n")
+		TEXT("and reads as a body being shaken rather than leaning."),
+		ECVF_Default);
+
 	static TAutoConsoleVariable<float> CVarRagdollTestBias(
 		TEXT("p.Ragdoll.TestBias"),
 		0.f,
@@ -1274,9 +1282,33 @@ void URagdollComponent::GatherTargetWeights(TMap<FName, float>& OutTargets) cons
 	}
 }
 
+bool URagdollComponent::AllowUnscopedPush(const TCHAR* FunctionName)
+{
+	if (Ragdoll::CVarRagdollAllowUnscopedPush.GetValueOnGameThread())
+	{
+		return true;
+	}
+
+	if (!bWarnedUnscopedPush)
+	{
+		bWarnedUnscopedPush = true;
+		UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s called %s with no bone. That covers every group the ")
+			TEXT("profile drives, arms and legs included. Pass the bone to push from, or set ")
+			TEXT("p.Ragdoll.AllowUnscopedPush=1 under [ConsoleVariables]."),
+			*GetNameSafe(GetOwner()), FunctionName);
+	}
+
+	return false;
+}
+
 void URagdollComponent::AddPhysicalBias(FVector Bias, FName BoneName, float HeightOffset)
 {
 	if (!IsRagdollRunnable())
+	{
+		return;
+	}
+
+	if (BoneName == NAME_None && !AllowUnscopedPush(TEXT("AddPhysicalBias")))
 	{
 		return;
 	}
@@ -1336,6 +1368,11 @@ void URagdollComponent::AddPhysicalBias(FVector Bias, FName BoneName, float Heig
 
 void URagdollComponent::AddPhysicalTorque(FVector Torque, FName BoneName)
 {
+	if (BoneName == NAME_None && !AllowUnscopedPush(TEXT("AddPhysicalTorque")))
+	{
+		return;
+	}
+
 	LastBiasFrame = GFrameCounter;
 
 	if (!IsRagdollRunnable() || CurrentState != ERagdollState::Physical || Torque.IsNearlyZero() || !Mesh)
@@ -1445,7 +1482,9 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 #if !UE_BUILD_SHIPPING
 	if (const float TestBias = Ragdoll::CVarRagdollTestBias.GetValueOnGameThread(); !FMath::IsNearlyZero(TestBias))
 	{
-		AddPhysicalBias(GetOwner()->GetActorForwardVector() * TestBias);
+		const FName TestBone = ActiveProfile.BoneGroups.Num() > 0 ?
+			ActiveProfile.BoneGroups[0].RootBone : NAME_None;
+		AddPhysicalBias(GetOwner()->GetActorForwardVector() * TestBias, TestBone);
 	}
 
 	if (Ragdoll::CVarRagdollDebugMotion.GetValueOnGameThread() > 0)

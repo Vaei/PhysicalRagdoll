@@ -186,12 +186,16 @@ public:
 	 * Applied at a point above each body's centre of mass. A force through the centre of mass produces no
 	 * torque and only shoves the chain along, so the height is what turns the push into a lean.
 	 *
+	 * BoneName scopes it. None means every group the active profile drives, which puts the push through the
+	 * arms and legs as well and reads as a body being shaken rather than leaning, so it is refused unless
+	 * p.Ragdoll.AllowUnscopedPush is set.
+	 *
 	 * @param Bias			World-space acceleration. Mass normalized, so weight does not change the lean.
-	 * @param BoneName		Bone to lean, covering everything below it. None uses the profile's groups.
+	 * @param BoneName		Bone to lean, covering everything below it
 	 * @param HeightOffset	Lever arm above the centre of mass. Larger pitches harder; negative inverts it.
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintCosmetic, Category="Ragdoll|Physical", meta=(AdvancedDisplay="HeightOffset"))
-	void AddPhysicalBias(FVector Bias, FName BoneName = NAME_None, float HeightOffset = 50.f);
+	void AddPhysicalBias(FVector Bias, FName BoneName, float HeightOffset = 50.f);
 
 	/**
 	 * Roll the driven bodies about a world axis, for this frame only.
@@ -201,10 +205,10 @@ public:
 	 * which has no meaningful direction to lean toward.
 	 *
 	 * @param Torque		World-space angular acceleration, in radians. Inertia normalized.
-	 * @param BoneName		Bone to roll around, covering everything below it. None uses the profile's groups.
+	 * @param BoneName		Bone to roll around, covering everything below it. @see AddPhysicalBias
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintCosmetic, Category="Ragdoll|Physical")
-	void AddPhysicalTorque(FVector Torque, FName BoneName = NAME_None);
+	void AddPhysicalTorque(FVector Torque, FName BoneName);
 
 	UFUNCTION(BlueprintPure, Category="Ragdoll|Physical")
 	FGameplayTag GetPhysicalProfile() const { return ActiveProfileTag; }
@@ -342,6 +346,12 @@ protected:
 	void DestroyDriveForBone(FName BoneName);
 	void DestroyAllDrives();
 
+	/**
+	 * Whether a push with no bone may cover every group the profile drives. Off unless
+	 * p.Ragdoll.AllowUnscopedPush is set, and warns once per component when it refuses.
+	 */
+	bool AllowUnscopedPush(const TCHAR* FunctionName);
+
 	/** Push one bone's blend weight to both the body modifier and the body itself */
 	void ApplyBoneWeight(FName BoneName, float Weight) const;
 
@@ -468,6 +478,8 @@ protected:
 	bool bRagdollBlendComplete = false;
 
 	bool bLoggedConvergedBodies = false;
+
+	bool bWarnedUnscopedPush = false;
 
 	/**
 	 * Frame a bias or torque last arrived.
