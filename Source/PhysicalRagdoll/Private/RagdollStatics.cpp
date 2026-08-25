@@ -431,7 +431,8 @@ void URagdollStatics::CalculateBaseDrive(const FRagdollBaseDrive& Params, FRagdo
 		return;
 	}
 
-	UPrimitiveComponent* Base = BaseComponent ? BaseComponent : (Character ? Character->GetMovementBase() : nullptr);
+	UPrimitiveComponent* Base = BaseComponent ? BaseComponent :
+		(Character ? Cast<UPrimitiveComponent>(Character->GetMovementBaseObject()) : nullptr);
 	State.ResolvedBase = Base;
 
 	FVector TargetBias = FVector::ZeroVector;
