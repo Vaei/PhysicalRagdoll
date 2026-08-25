@@ -156,8 +156,8 @@ Speed scales the layer, through a curve or a range. Acceleration leans it, split
 
 | Component | Case | Property |
 | --- | --- | --- |
-| Along travel, gaining speed | Pushing off | `AccelerationScale` |
-| Along travel, losing speed | Planting to stop | `BrakingScale` |
+| Along travel, gaining speed | Starting | `AccelerationScale` |
+| Along travel, losing speed | Stopping | `BrakingScale` |
 | Across travel | Input cutting against your own momentum | `TurnScale` |
 
 `MaxBias` caps the result. The bias is a mass-normalised acceleration, so a hand leans as much as a torso. `PushBias` and `TurnBias` come back separately, to scale or invert either half.
