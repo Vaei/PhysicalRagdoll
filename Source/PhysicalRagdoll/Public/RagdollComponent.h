@@ -10,6 +10,7 @@
 #include "RagdollComponent.generated.h"
 
 class ACharacter;
+class URagdollProfileAsset;
 class UPhysicsAsset;
 class UPhysicsControlComponent;
 class USkeletalMeshComponent;
@@ -40,9 +41,30 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category="Ragdoll")
 	TSubclassOf<UPhysicsControlComponent> PhysicsControlComponentClass;
 
+	/** Where the levels of physicality below are read from */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical")
+	ERagdollTuningSource PhysicalProfileSource = ERagdollTuningSource::Inline;
+
 	/** Levels of physicality that can be applied over regular animation */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(Categories="Ragdoll.Profile"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(Categories="Ragdoll.Profile", EditCondition="PhysicalProfileSource == ERagdollTuningSource::Inline", EditConditionHides))
 	TMap<FGameplayTag, FRagdollPhysicalProfile> PhysicalProfiles;
+
+	/** Profiles held in assets. Edits to one rebuild the drives immediately, so springs can be tuned in play. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(Categories="Ragdoll.Profile", EditCondition="PhysicalProfileSource == ERagdollTuningSource::Asset", EditConditionHides))
+	TMap<FGameplayTag, TObjectPtr<URagdollProfileAsset>> PhysicalProfileAssets;
+
+	/**
+	 * Catches a body the solver has thrown, before it reads as a limb coming off. Keep it well above any
+	 * deviation the drives are meant to produce.
+	 *
+	 * Distance from the bone it is holding, past which the body is snapped back. Zero disables the check.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(UIMin="0", ForceUnits="cm"))
+	float MaxBodySeparation = 60.f;
+
+	/** Ceiling on a driven body's spin, so one bad frame cannot wind it up. Zero leaves the body's own limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(UIMin="0", ForceUnits="deg/s"))
+	float MaxBodyAngularSpeed = 2000.f;
 
 	/** Profile applied on BeginPlay. Empty to start without a physical layer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(Categories="Ragdoll.Profile"))
@@ -139,6 +161,33 @@ public:
 
 	// --- Physical API ---
 
+	/** Asset the active profile came from, and the revision its drives were built against */
+	TWeakObjectPtr<URagdollProfileAsset> ActiveProfileAsset;
+
+	uint32 ActiveProfileRevision = 0;
+
+protected:
+	/**
+	 * Overrides gameplay wants on top of the profile's own, read fresh whenever they are resolved.
+	 * Pulled rather than pushed, so a subclass answers from the state it already has and nothing has to
+	 * remember to take an override back when that state changes.
+	 */
+	virtual void GatherRuntimeBoneOverrides(TArray<FRagdollRuntimeBoneOverride>& OutOverrides) const {}
+
+	/** What the last gather returned, so the drives are only rebuilt when the answer actually changes */
+	TArray<FRagdollRuntimeBoneOverride> RuntimeBoneOverrides;
+
+	/** Rebuild the drives if the gathered overrides have moved since the last time they were read */
+	void RefreshBoneOverrides();
+
+	/** Rebuild the drives when the asset behind the active profile has been edited */
+	void RefreshProfileFromAsset();
+
+	/** Put back any driven body the solver has thrown, so a blow-up cannot read as a limb coming off */
+	void EnforceBodySafety();
+
+public:
+
 	/** Blend to a profile from PhysicalProfiles. An empty tag clears the physical layer. */
 	UFUNCTION(BlueprintCallable, BlueprintCosmetic, Category="Ragdoll|Physical", meta=(Categories="Ragdoll.Profile"))
 	void SetPhysicalProfile(FGameplayTag ProfileTag);
@@ -209,6 +258,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintCosmetic, Category="Ragdoll|Physical")
 	void AddPhysicalTorque(FVector Torque, FName BoneName);
+
+	/** World-space offset on what the motors drive to, at BoneName. This frame only; call it every frame. */
+	UFUNCTION(BlueprintCallable, BlueprintCosmetic, Category="Ragdoll|Physical")
+	void SetPhysicalLean(FRotator Lean, FName BoneName);
+
+	/** Put every leaned control back on the animated pose */
+	UFUNCTION(BlueprintCallable, BlueprintCosmetic, Category="Ragdoll|Physical")
+	void ClearPhysicalLean();
 
 	UFUNCTION(BlueprintPure, Category="Ragdoll|Physical")
 	FGameplayTag GetPhysicalProfile() const { return ActiveProfileTag; }
@@ -340,7 +397,57 @@ protected:
 	static FName MakeOperatorName(FName BoneName);
 
 	/** Create the body modifier and, unless the bone is only fading out, the control that drives it */
-	void CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData, EPhysicsControlType ControlType, FName ConstraintProfile) const;
+	void CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData, EPhysicsControlType ControlType,
+		FName ConstraintProfile) const;
+
+	/** The group's spring, with the load scale and the frequency cap already in it */
+	FPhysicsControlData ResolveGroupSpring(const FRagdollBoneGroup& Group, FName BoneName) const;
+
+	/** How much more inertia this bone swings than its own body, as a strength scale. 1 at a leaf. */
+	float CalculateLoadScale(FName BoneName, float MaxScale) const;
+
+	/** Point the physics asset's own joint at the animated pose and give it the group's motor */
+	void SetupJointDriveForBone(FName BoneName, const FPhysicsControlData& ControlData);
+
+	/** Joint drives take the profile and layer strength the same way the controls do */
+	void ApplyJointDriveStrength(float Multiplier);
+
+	/** Stiffness, damping and torque limit each driven joint was set up with, before the layer strength */
+	TMap<FName, FVector> JointDriveParams;
+
+	float AppliedJointDriveStrength = -1.f;
+
+	/** Hand the joint back to whatever the physics asset authored */
+	void ClearJointDriveForBone(FName BoneName) const;
+
+	/** Negative for either count puts the body back on the scene default */
+	static void SetBodyIterationCounts(FBodyInstance* Body, int32 Position, int32 Velocity);
+
+	void RestoreBodyIterationCounts();
+
+	/** Solver iteration counts each driven body had before a group replaced them */
+	TMap<FName, FIntPoint> RestoreIterationCounts;
+
+	/** Joints this component turned drives on for, so they can be handed back on teardown */
+	TSet<FName> DrivenJoints;
+
+	/**
+	 * Feed each driven joint the speed its animated target is moving at.
+	 *
+	 * The engine writes the joint's orientation target from the animation but never its velocity, so the
+	 * damping term reads the body's motion as something to cancel and holds it back from following.
+	 */
+	void UpdateJointDriveVelocities(float DeltaTime);
+
+	/** Animated local rotation each driven joint was asked for last frame */
+	TMap<FName, FQuat> PreviousJointTargets;
+
+	/** Ceiling on the animated speed fed to a joint drive, in revolutions per second */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ragdoll|Physical", meta=(UIMin="0", UIMax="10"))
+	float MaxJointDriveVelocity = 2.f;
+
+	/** What the mesh had before a joint drive group asked for animated joint targets */
+	bool bRestoreUpdateJointsFromAnimation = false;
 
 	/** Ensure only the body modifier exists, so a bone dropped by a new profile can still fade out */
 	void EnsureBodyModifierForBone(FName BoneName) const;
@@ -494,6 +601,19 @@ protected:
 	 * quietly does nothing.
 	 */
 	uint64 LastBiasFrame = 0;
+
+	TSet<FName> LeanedBones;
+	TSet<FName> PendingLeanBones;
+
+	/** World-space lean currently held per bone, so an unchanged one does not keep waking the bodies */
+	TMap<FName, FQuat> HeldLeans;
+
+	/**
+	 * Push the held leans onto the joints, from this component's tick.
+	 * A driven joint has its target rewritten from the animation during the mesh's tick, and a caller has
+	 * no ordering against that, so the offset has to be reapplied somewhere that does.
+	 */
+	void ApplyHeldLeansToJoints();
 
 #if !UE_BUILD_SHIPPING
 	/** Last bias handed to AddPhysicalBias, for the motion debug */

@@ -451,10 +451,11 @@ void URagdollStatics::CalculateBaseDrive(const FRagdollBaseDrive& Params, FRagdo
 
 	FVector TargetBias = FVector::ZeroVector;
 	FVector TargetTorque = FVector::ZeroVector;
+	FVector AngularVelocity = FVector::ZeroVector;
 
 	if (Base)
 	{
-		const FVector AngularVelocity = Base->GetPhysicsAngularVelocityInRadians();
+		AngularVelocity = Base->GetPhysicsAngularVelocityInRadians();
 
 		// Velocity of the base at the character's feet rather than at its origin, since a deck's far end
 		// moves a great deal more than its centre when it rolls
@@ -470,10 +471,24 @@ void URagdollStatics::CalculateBaseDrive(const FRagdollBaseDrive& Params, FRagdo
 			PointVelocity.Z = 0.f;
 		}
 
-		// Negated: the body is left behind by whatever moves under it, which is the whole reaction
-		TargetBias = (-PointVelocity * Params.TranslationScale).GetClampedToMaxSize(Params.MaxBias);
+		const float GravityZ = Base->GetWorld() ? Base->GetWorld()->GetGravityZ() : -980.f;
+		State.TiltAcceleration = CalculateBaseTilt(Base, FVector::DownVector, FMath::Abs(GravityZ),
+			Params.MaxTiltAngle, State.TiltAngle);
+
+		// Negated: the body is left behind by whatever moves under it, and leans up the slope rather than
+		// down it, which between them are the whole reaction
+		TargetBias = (-PointVelocity * Params.TranslationScale - State.TiltAcceleration * Params.TiltScale)
+			.GetClampedToMaxSize(Params.MaxBias);
 		TargetTorque = (-AngularVelocity * Params.RotationScale).GetClampedToMaxSize(Params.MaxTorque);
 	}
+	else
+	{
+		State.TiltAcceleration = FVector::ZeroVector;
+		State.TiltAngle = 0.f;
+	}
+
+	const FRotator TargetLean = CalculateBaseLean(Params, State, DeltaTime, State.TiltAcceleration,
+		State.TiltAngle, AngularVelocity, FVector::DownVector);
 
 	if (Params.InterpRate > 0.f)
 	{
@@ -486,6 +501,136 @@ void URagdollStatics::CalculateBaseDrive(const FRagdollBaseDrive& Params, FRagdo
 		State.Bias = TargetBias;
 		State.Torque = TargetTorque;
 	}
+
+	if (Params.LeanInterpRate > 0.f)
+	{
+		const float LeanAlpha = 1.f - FMath::Exp(-Params.LeanInterpRate * DeltaTime);
+		State.Lean = FQuat::Slerp(State.Lean.Quaternion(), TargetLean.Quaternion(), LeanAlpha).Rotator();
+	}
+	else
+	{
+		State.Lean = TargetLean;
+	}
+}
+
+FVector URagdollStatics::CalculateBaseTilt(const UPrimitiveComponent* Base, FVector GravityDirection,
+	float GravityMagnitude, float MaxTiltAngle, float& OutTiltAngle)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::CalculateBaseTilt);
+
+	OutTiltAngle = 0.f;
+
+	const FVector Down = GravityDirection.GetSafeNormal();
+	if (!Base || Down.IsNearlyZero() || GravityMagnitude <= 0.f)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FVector Up = Base->GetComponentQuat().GetAxisZ();
+	OutTiltAngle = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Up, -Down), -1.f, 1.f)));
+
+	// Gravity resolved onto the surface, which is the slope: zero when level, g at ninety degrees
+	const FVector Downhill = FVector::VectorPlaneProject(Down * GravityMagnitude, Up);
+
+	if (MaxTiltAngle <= 0.f || OutTiltAngle <= MaxTiltAngle)
+	{
+		return Downhill;
+	}
+
+	// Past the cap the direction still tracks the base, only the magnitude stops
+	return Downhill.GetSafeNormal() * (GravityMagnitude * FMath::Sin(FMath::DegreesToRadians(MaxTiltAngle)));
+}
+
+FRotator URagdollStatics::CalculateBaseLean(const FRagdollBaseDrive& Params, FRagdollBaseDriveState& State,
+	float DeltaTime, FVector TiltAcceleration, float TiltAngle, FVector AngularVelocity, FVector GravityDirection)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::CalculateBaseLean);
+
+	const FVector Up = -GravityDirection.GetSafeNormal();
+	if (Up.IsNearlyZero() || DeltaTime <= 0.f)
+	{
+		return State.Lean;
+	}
+
+	/**
+	 * A deck that rotates under a body leaves it where it was, and the body's own balance is what brings it
+	 * back upright. Running that as a spring is what separates the two cases: a steady list settles out and
+	 * costs nothing to stand on, while a roll keeps knocking the body off before it has finished catching
+	 * itself, which is the part that reads as struggling rather than as riding along.
+	 */
+	const float Omega = FMath::Max(Params.BalanceFrequency, 0.01f) * UE_TWO_PI;
+
+	State.SwayVelocity += (-FMath::Square(Omega) * State.Sway
+		- 2.f * Params.BalanceDampingRatio * Omega * State.SwayVelocity) * DeltaTime;
+	State.Sway += (State.SwayVelocity - AngularVelocity * Params.SwayScale) * DeltaTime;
+
+	FQuat Lean = FQuat::MakeFromRotationVector(State.Sway);
+
+	// Uphill, because a body on a slope keeps its weight over its feet by leaning into it
+	const FVector Uphill = (-TiltAcceleration).GetSafeNormal();
+	const FVector TiltAxis = FVector::CrossProduct(Up, Uphill).GetSafeNormal();
+
+	if (Params.TiltLeanScale > 0.f && !TiltAxis.IsNearlyZero())
+	{
+		Lean = FQuat(TiltAxis, FMath::DegreesToRadians(TiltAngle * Params.TiltLeanScale)) * Lean;
+	}
+
+	Lean.Normalize();
+
+	if (Params.MaxLeanAngle > 0.f)
+	{
+		FVector Axis;
+		float Angle;
+		Lean.ToAxisAndAngle(Axis, Angle);
+
+		const float MaxAngle = FMath::DegreesToRadians(Params.MaxLeanAngle);
+		if (FMath::Abs(FMath::UnwindRadians(Angle)) > MaxAngle)
+		{
+			Lean = FQuat(Axis, FMath::Sign(FMath::UnwindRadians(Angle)) * MaxAngle);
+		}
+	}
+
+	return Lean.Rotator();
+}
+
+void URagdollStatics::DrawBaseDriveDebug(const UObject* WorldContextObject, const FVector& Origin,
+	const FRagdollBaseDriveState& State, FVector PointAcceleration, FVector AngularVelocity)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollStatics::DrawBaseDriveDebug);
+
+	const UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr;
+	if (!World)
+	{
+		return;
+	}
+
+	const UPrimitiveComponent* Base = State.ResolvedBase.Get();
+	const uint64 Key = GetTypeHash(Origin);
+
+	if (!Base)
+	{
+		GEngine->AddOnScreenDebugMessage(Key, 0.f, FColor::Red,
+			TEXT("Ragdoll base drive: nothing is carrying this character, so the drive has nothing to read"));
+		return;
+	}
+
+	GEngine->AddOnScreenDebugMessage(Key, 0.f, FColor::Cyan, FString::Printf(
+		TEXT("Ragdoll base drive on %s: tilt %.1f deg (%.0f cm/s2), point accel %.0f cm/s2, angular %.2f rad/s")
+		TEXT(" -> lean %.1f deg, bias %.0f cm/s2, torque %.2f rad/s2"),
+		*GetNameSafe(Base), State.TiltAngle, State.TiltAcceleration.Size(), PointAcceleration.Size(),
+		AngularVelocity.Size(), FMath::RadiansToDegrees(State.Lean.Quaternion().GetAngle()),
+		State.Bias.Size(), State.Torque.Size()));
+
+	// Downhill and the bias, which lean opposite ways: the body braces up the slope, it does not slide down it
+	DrawDebugDirectionalArrow(World, Origin, Origin + State.TiltAcceleration.GetSafeNormal() * 100.f,
+		20.f, FColor::Yellow, false, -1.f, 0, 2.f);
+	DrawDebugDirectionalArrow(World, Origin, Origin + State.Bias.GetSafeNormal() * 100.f,
+		20.f, FColor::Green, false, -1.f, 0, 3.f);
+
+	const FVector BaseOrigin = Base->GetComponentLocation();
+	DrawDebugDirectionalArrow(World, BaseOrigin, BaseOrigin + Base->GetComponentQuat().GetAxisZ() * 400.f,
+		40.f, FColor::Blue, false, -1.f, 0, 3.f);
+	DrawDebugLine(World, BaseOrigin, Origin, FColor::White, false, -1.f, 0, 1.f);
 }
 
 void URagdollStatics::CalculateBoneDeltaDrive(const FRagdollBoneDeltaDrive& Params, FRagdollBoneDeltaDriveState& State,

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "PhysicsControlData.h"
 
 #include "RagdollTypes.generated.h"
@@ -10,6 +11,14 @@
 class UAnimMontage;
 class UCurveFloat;
 class UPrimitiveComponent;
+
+/** Where a block of tuning is read from. Asset can be edited while the game is running; inline cannot. */
+UENUM(BlueprintType)
+enum class ERagdollTuningSource : uint8
+{
+	Inline	UMETA(ToolTip="Held on the component, and fixed once the game is running"),
+	Asset	UMETA(ToolTip="Held in a data asset, so edits apply during play")
+};
 
 UENUM(BlueprintType)
 enum class ERagdollState : uint8
@@ -95,49 +104,144 @@ struct PHYSICALRAGDOLL_API FRagdollBoneGroup
 {
 	GENERATED_BODY()
 
-	FRagdollBoneGroup()
-	{
-		ControlData.AngularStrength = 3.2f;
-		ControlData.AngularDampingRatio = 1.f;
-	}
+	FRagdollBoneGroup() = default;
 
-	FRagdollBoneGroup(FName InRootBone, bool bInIncludeRootBone = true, float InBlendWeight = 1.f, const FPhysicsControlData& InControlData = {})
+	FRagdollBoneGroup(FName InRootBone, bool bInIncludeRootBone = true, float InBlendWeight = 1.f)
 		: RootBone(InRootBone)
 		, bIncludeRootBone(bInIncludeRootBone)
 		, BlendWeight(InBlendWeight)
-		, ControlData(InControlData)
 	{}
 
-	/** Bone at which this group starts */
+	/** Bone the group starts at. Everything below it in the physics asset comes with it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
 	FName RootBone = "spine_01";
 
-	/** Whether RootBone itself belongs to the group */
+	/** Clear to drive the bones below RootBone while leaving RootBone itself on the animation */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
 	bool bIncludeRootBone = true;
 
-	/** How much physics overrides animation. 0 = pure animation, 1 = pure physics. Tune feel with the motor strengths, not this. */
+	/**
+	 * How much of the final pose is physics rather than animation. Reach for this to dial the whole group
+	 * up or down at once; use the spring for how it moves.
+	 *
+	 * Blended per bone after the simulation, so 1 shows every bit of solver compliance and lower values
+	 * hide it behind the clean animated pose.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", UIMax="1", ClampMin="0", ClampMax="1"))
 	float BlendWeight = 1.f;
 
 	/**
-	 * What each driven body is held relative to.
+	 * What each body is held against. WorldSpace for a body that has to hold its pose, ParentSpace for one
+	 * that should follow wherever the chain takes it.
 	 *
-	 * ParentSpace drives a body against its physical parent, so the group holds its own shape and follows
-	 * wherever the animation carries the chain. WorldSpace drives every body against the world independently,
-	 * which resists being carried and is what a group needs when it has no parent body to hang off.
+	 * ParentSpace errors accumulate down a chain, so a long one wanders at the tip however stiff each joint
+	 * is. WorldSpace gives every body its own absolute target and does not accumulate.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
-	EPhysicsControlType ControlType = EPhysicsControlType::ParentSpace;
-
-	/** Spring and damper settings holding the group toward its animated pose */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
-	FPhysicsControlData ControlData;
+	EPhysicsControlType ControlType = EPhysicsControlType::WorldSpace;
 
 	/**
-	 * Constraint profile authored in the physics asset, whose joint drives initialize this group's strengths
-	 * in place of ControlData. Optional, and forces ParentSpace, since a joint drive is parent relative.
-	 * Bodies the profile does not name fall back to the physics asset's default constraint drives.
+	 * How hard the body is pulled back onto its animated pose. Raise it to stop the group sagging or lagging.
+	 *
+	 * Angular acceleration per radian of error. Its square root is the drive's frequency in rad/s.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Spring, meta=(UIMin="0", UIMax="100000"))
+	float AngularStiffness = 5700.f;
+
+	/**
+	 * How hard the body resists moving. Raise it to kill wobble and overshoot, lower it to let the group swing.
+	 *
+	 * Angular acceleration per rad/s. 2*sqrt(AngularStiffness) is critical: below rings, above is sluggish.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Spring, meta=(UIMin="0", UIMax="2000"))
+	float AngularDamping = 180.f;
+
+	/**
+	 * The most the motor may spend. Set it when something should be able to shove the body around rather
+	 * than have the drive quietly cancel it.
+	 *
+	 * Zero is unlimited, which is a motor that always wins.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Spring, meta=(UIMin="0"))
+	float AngularMaxTorque = 0.f;
+
+	/** How hard the body is pulled back to its animated position. Acceleration per cm of error. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Spring, meta=(UIMin="0", UIMax="10000"))
+	float LinearStiffness = 5.f;
+
+	/** How hard the body resists being moved. Acceleration per cm/s, with 2*sqrt(LinearStiffness) critical. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Spring, meta=(UIMin="0", UIMax="1000"))
+	float LinearDamping = 5.f;
+
+	/** The most the linear motor may spend. Zero is unlimited. @see AngularMaxTorque */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Spring, meta=(UIMin="0"))
+	float LinearMaxForce = 0.f;
+
+	/** Drive toward the animation. Clear it and the body holds wherever it started instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
+	bool bUseSkeletalAnimation = true;
+
+	/**
+	 * Makes the spring numbers mean the same thing on a hand as on a torso. Leave it on.
+	 *
+	 * Normalizes by the body's own inertia, which knows nothing of the chain below it. @see bScaleStrengthByLoad
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
+	bool bUseAccelerationDriveMode = true;
+
+	/** Stop a driven body colliding with the one it is held against, if the two are interpenetrating */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
+	bool bDisableCollision = false;
+
+	/**
+	 * Stops the top of a chain sagging while the ends stay stiff. Leave it on for any group covering a spine.
+	 *
+	 * Scales the spring by the inertia the joint actually carries. Parent space only: a world space drive has
+	 * no chain hanging off it to correct for.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
+	bool bScaleStrengthByLoad = true;
+
+	/** Lower it if a joint has gone rigid, so one badly weighted body cannot run away with the scale */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="1", UIMax="50", ClampMin="1", EditCondition="bScaleStrengthByLoad"))
+	float MaxLoadScale = 20.f;
+
+	/**
+	 * Stops the load scale making one joint rigid while the rest of the group stays soft. Off by default.
+	 *
+	 * Caps sqrt(AngularStiffness) after the load scale, in Hz. There is no stability reason to cap it: Chaos
+	 * solves drives with XPBD, which saturates into a rigid constraint rather than ringing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", UIMax="60", ForceUnits="Hz"))
+	float MaxDriveFrequency = 0.f;
+
+	/**
+	 * Raise it if a long chain still sags at any stiffness. Costs CPU per driven body.
+	 *
+	 * Chaos solves joints one pair at a time, so a chain's load only reaches its root after enough passes.
+	 * Zero leaves the scene default alone.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", UIMax="64"))
+	uint8 PositionSolverIterations = 32;
+
+	/** @see PositionSolverIterations */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", UIMax="32"))
+	uint8 VelocitySolverIterations = 8;
+
+	/**
+	 * Use the physics asset's own joints rather than adding a second constraint per body. Try it if two
+	 * constraints on the same pair of bodies are fighting.
+	 *
+	 * The engine writes their targets from the animated pose. Parent space only, since a joint drive is
+	 * parent relative.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(EditCondition="ControlType == EPhysicsControlType::ParentSpace"))
+	bool bUseJointDrives = false;
+
+	/**
+	 * Take the spring from a constraint profile authored in the physics asset instead of the values above.
+	 *
+	 * Optional, and forces ParentSpace, since a joint drive is parent relative.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(GetOptions="GetConstraintProfileOptions"))
 	FName ControlDataConstraintProfile = NAME_None;
@@ -152,21 +256,42 @@ struct PHYSICALRAGDOLL_API FRagdollBoneOverride
 {
 	GENERATED_BODY()
 
-	/** Bone this override starts at */
+	/** Bone the override starts at. Everything below it comes with it unless bIncludeSelf is cleared. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
 	FName BoneName;
 
-	/** If false, the bone itself is untouched and the override applies only below it */
+	/** Clear to leave this bone alone and apply the override only below it */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
 	bool bIncludeSelf = true;
 
-	/** Keep these bones off physics entirely, so they follow animation instead of inheriting the group */
+	/** Take these bones off the layer entirely, so they follow the animation exactly. Use it for an arm holding something. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
 	bool bDisablePhysics = false;
 
-	/** Scales the weight these bones receive from the group */
+	/** Thin the layer on these bones without removing it, e.g. so a head does not swim */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", UIMax="1", ClampMin="0", ClampMax="1", EditCondition="!bDisablePhysics", EditConditionHides))
 	float BlendWeightScalar = 1.f;
+
+	bool operator==(const FRagdollBoneOverride& Other) const = default;
+};
+
+/**
+ * A bone override gameplay adds while the game is running, on top of whatever the profile authored.
+ * An arm holding something wants taking off the layer for as long as it is holding it.
+ */
+USTRUCT(BlueprintType)
+struct PHYSICALRAGDOLL_API FRagdollRuntimeBoneOverride
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical)
+	FRagdollBoneOverride Override;
+
+	/** Profile it applies to. Empty applies to whichever profile is running. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(Categories="Ragdoll.Profile"))
+	FGameplayTag ProfileTag;
+
+	bool operator==(const FRagdollRuntimeBoneOverride& Other) const = default;
 };
 
 /**
@@ -178,30 +303,35 @@ struct PHYSICALRAGDOLL_API FRagdollPhysicalProfile
 {
 	GENERATED_BODY()
 
-	/** Bodies driven by this profile. Where groups overlap, later entries win. */
+	/** Bodies this profile drives, one group per set of springs. Where groups overlap, later entries win. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(TitleProperty="RootBone"))
 	TArray<FRagdollBoneGroup> BoneGroups;
 
 	/**
-	 * Per-bone adjustments layered on top of the groups, each covering the bone and everything below it.
-	 * Order is not significant: where entries overlap, the most restrictive one wins.
+	 * Carve bones out of the groups above: thin the layer on a head, take it off an arm entirely.
+	 *
+	 * Each covers the bone and everything below it. Order is not significant; where they overlap the most
+	 * restrictive wins.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(TitleProperty="BoneName"))
 	TArray<FRagdollBoneOverride> BoneOverrides;
 
-	/** Scales every motor in the profile */
+	/** Scales every spring in the profile at once, for dialling the whole thing up or down */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", ClampMin="0"))
 	float StrengthMultiplier = 1.f;
 
 	/**
-	 * How fast bones move toward their target weight, per second.
-	 * Frame rate independent. Above ~12 the transition reads as a snap.
+	 * How fast the profile fades in and out. Above about 12 the transition reads as a snap.
+	 *
+	 * Bone weight change per second, frame rate independent.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(UIMin="0", ClampMin="0", UIMax="12"))
 	float BoneBlendRate = 7.f;
 
 	/**
-	 * Constraint profile authored in the physics asset, applied to every joint while this profile is active.
+	 * Constraint profile from the physics asset, applied to every joint while this profile runs. Use it to
+	 * widen limits or change drives that only suit this level of physicality.
+	 *
 	 * Optional. Reverts to URagdollComponent::DefaultConstraintProfile when the profile ends.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Physical, meta=(GetOptions="GetConstraintProfileOptions"))
@@ -223,114 +353,140 @@ struct PHYSICALRAGDOLL_API FRagdollMotionDrive
 {
 	GENERATED_BODY()
 
-	/** Maps speed, normalized against the max speed passed in, to a scale on the whole layer. Falls back to SpeedRange/AlphaRange when unset. */
+	/**
+	 * Shape how much physicality the character gets at each speed. Replaces SpeedRange and AlphaRange.
+	 *
+	 * Input is speed normalized against the mover's max speed, output scales the whole layer.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Speed")
 	TObjectPtr<UCurveFloat> SpeedCurve = nullptr;
 
-	/** Speed range mapped to AlphaRange when no SpeedCurve is set */
+	/** Speed range the layer fades in over, when no SpeedCurve is set */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Speed", meta=(EditCondition="SpeedCurve == nullptr", ForceUnits="cm/s"))
 	FVector2D SpeedRange = FVector2D(0.f, 600.f);
 
-	/** Layer scale at each end of SpeedRange */
+	/** How much layer the character gets at each end of SpeedRange. X is standing still. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Speed", meta=(EditCondition="SpeedCurve == nullptr"))
 	FVector2D AlphaRange = FVector2D(0.35f, 1.f);
 
 	/**
-	 * Lean while speeding up, along the direction of travel.
+	 * How much the body leans into a push-off. Go above 1 to lean forward, below to trail behind.
 	 *
-	 * The simulated bodies hang off a kinematic pelvis that is accelerating out from under them, so they
-	 * already trail by the full acceleration on their own. 1 cancels that and leaves the body upright.
-	 * Only above 1 does it lean into the motion; below 1 it still trails, just less than it would have.
+	 * The bodies hang off an accelerating kinematic pelvis and already trail on their own, so 1 only
+	 * cancels that and leaves the body upright.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias", meta=(UIMin="0", UIMax="3"))
 	float AccelerationScale = 2.5f;
 
-	/** Lean while slowing down. Usually higher than AccelerationScale, since stopping is the sharper event. */
+	/** How much the body pitches when braking. Usually higher than AccelerationScale, stopping being sharper. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias", meta=(UIMin="0", UIMax="3"))
 	float BrakingScale = 0.5f;
 
-	/** Flips which side of the arc the turn lean falls on */
+	/** Flips which side of the arc the turn lean falls on, if it is leaning the wrong way */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias")
 	bool bInvertTurn = false;
 
 	/**
-	 * Lean into a turn, scaling the centripetal acceleration the turn actually implies (speed x yaw rate).
-	 * Has to beat the body's own rotational trailing before any lean shows, so it wants to be generous.
+	 * How much the body banks into a turn. Wants to be generous before any lean shows at all.
+	 *
+	 * Scales the centripetal acceleration the turn implies (speed x yaw rate), and has to beat the body's
+	 * own rotational trailing first.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias", meta=(UIMin="0", UIMax="3"))
 	float TurnScale = 1.0f;
 
 	/**
-	 * Scale applied when moving straight backward, reaching 1 when moving straight ahead.
-	 * Backpedalling is a smaller, more careful movement than running, and carrying the same physicality
-	 * into it reads as the character being thrown around by a walk.
+	 * How much layer survives when backpedalling. Lower it if walking backwards throws the body around.
+	 *
+	 * Reaches 1 moving straight ahead.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Direction", meta=(UIMin="0", UIMax="1"))
 	float BackwardScale = 0.3f;
 
-	/** Maps forwardness, remapped from -1..1 to 0..1, to the scale. Replaces BackwardScale when set. */
+	/** Shape the direction scale yourself. Input is forwardness remapped from -1..1 to 0..1. Replaces BackwardScale. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Direction")
 	TObjectPtr<UCurveFloat> DirectionCurve = nullptr;
 
 	/**
-	 * How fast bone weights move while nothing is accelerating the character.
-	 * Slower than the accelerating rate suits a settled body: it stops the layer twitching at every
-	 * small change while the character is just standing or holding a speed.
+	 * How fast the layer changes while the character is settled. Lower it if the layer twitches when idle.
+	 *
+	 * Bone weight blend rate while nothing is accelerating.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Strength", meta=(UIMin="0", UIMax="20"))
 	float SteadyBlendRate = 3.f;
 
-	/** How fast bone weights move under full acceleration, where the layer needs to keep up */
+	/** How fast the layer changes under full acceleration, where it has to keep up with the movement */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Strength", meta=(UIMin="0", UIMax="20"))
 	float AcceleratingBlendRate = 10.f;
 
 	/**
-	 * Motor strength while travelling at a constant speed.
-	 * At 1 the body actively holds its pose, which is what stops steady movement reading as a wobble.
-	 * The blend weight is untouched, so the layer is still doing its job.
+	 * How firmly the body holds its pose at a constant speed. 1 is the group's own spring, and stops
+	 * steady movement reading as a wobble.
+	 *
+	 * Scales the motor only. The blend weight is untouched, so the layer is still doing its job.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Strength", meta=(UIMin="0", UIMax="2"))
 	float SteadyStrength = 1.f;
 
 	/**
-	 * Motor strength under full acceleration.
-	 * Below SteadyStrength the body gives while it is being pushed around, which is what lets the lean
-	 * read at all. Too low and it goes floppy the moment you touch the stick.
+	 * How much the body gives while accelerating. Below SteadyStrength is what lets the lean read at all;
+	 * too low and it goes floppy the moment you touch the stick.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Strength", meta=(UIMin="0", UIMax="2"))
 	float AcceleratingStrength = 0.45f;
 
 	/**
-	 * Ceiling on the bias, and the thing to check first if the lean never appears.
-	 * It has to sit above the character's MaxAcceleration (2048 by default) with the scales applied,
-	 * or it clamps away the part that cancels the natural trailing and the body only ever lags.
+	 * Ceiling on the push. Check this first if the lean never appears at any scale.
+	 *
+	 * Has to sit above the mover's MaxAcceleration with the scales applied, or it clamps away the part that
+	 * cancels the natural trailing and the body only ever lags.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias", meta=(UIMin="0", ForceUnits="cm/s2"))
 	float MaxBias = 4000.f;
 
-	/** How fast the bias follows the movement. Low values trail the motion, high values snap to it. */
+	/** How fast the push follows the movement. Low trails the motion, high snaps to it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias", meta=(UIMin="0", UIMax="30"))
 	float BiasInterpRate = 12.f;
 
-	/** Whether the layer keeps running while airborne */
+	/** Keep the layer running while airborne. Clear it to drop the physicality off the ground entirely. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Falling")
 	bool bDriveWhileFalling = true;
 
-	/** Maps vertical speed, normalized against ReferenceFallSpeed, to a scale on the layer while airborne */
+	/** Shape how much layer a fall gets. Input is vertical speed normalized against ReferenceFallSpeed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Falling", meta=(EditCondition="bDriveWhileFalling"))
 	TObjectPtr<UCurveFloat> FallCurve = nullptr;
 
-	/** Vertical speed that maps to 1 on the fall curve's input */
+	/** Fall speed that counts as a full fall on the curve's input */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Falling", meta=(UIMin="1", EditCondition="bDriveWhileFalling", ForceUnits="cm/s"))
 	float ReferenceFallSpeed = 1200.f;
 
 	/**
-	 * Scales the horizontal bias while airborne.
-	 * Off the ground there is nothing to push against, so the same lean that reads as effort on the
-	 * ground reads as flailing in the air.
+	 * How much of the push survives in the air. Lower it if the character flails while airborne.
+	 *
+	 * Off the ground there is nothing to push against, so the lean that reads as effort reads as flailing.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Falling", meta=(UIMin="0", UIMax="1", EditCondition="bDriveWhileFalling"))
 	float FallBiasScale = 0.3f;
+
+	/** Bone the push is scoped to. Lower down the spine puts more of the body into it; None reads as a shake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias")
+	FName BiasBone = "spine_03";
+
+	/** Lever arm above the centre of mass. Higher tips the body further for the same push. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Bias", meta=(ForceUnits="cm"))
+	float BiasHeightOffset = 20.f;
+
+	/**
+	 * How much firmer the body gets the moment input stops. Raise it if he swings on after you let go.
+	 *
+	 * Multiplies the motor strength while there is no input.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Strength", meta=(UIMin="1", UIMax="8"))
+	float BrakingStrengthScale = 3.f;
+
+	/** How much faster the layer settles once input stops. @see BrakingStrengthScale */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Motion|Strength", meta=(UIMin="1", UIMax="8"))
+	float BrakingRateScale = 5.f;
 };
 
 /**
@@ -562,6 +718,81 @@ struct PHYSICALRAGDOLL_API FRagdollMotionDriveState
 };
 
 /**
+ * How the motion of whatever the character is riding is measured. Derived from the base's transform, since
+ * a base moved by replication, smoothing or a spline leaves no velocity to read.
+ */
+USTRUCT(BlueprintType)
+struct PHYSICALRAGDOLL_API FRagdollBaseMotion
+{
+	GENERATED_BODY()
+
+	/** Smoothing on the base's measured velocity. Raise it if the drive jitters on a replicated base. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=BaseMotion, meta=(UIMin="0", UIMax="60"))
+	float InterpRate = 20.f;
+
+	/** Smoothing on the base's measured acceleration. A second difference, so it needs far more than velocity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=BaseMotion, meta=(UIMin="0", UIMax="60"))
+	float AccelerationInterpRate = 5.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=BaseMotion, meta=(UIMin="0", ForceUnits="cm/s"))
+	float MaxLinearSpeed = 4000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=BaseMotion, meta=(UIMin="0", ForceUnits="cm/s2"))
+	float MaxLinearAcceleration = 4000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=BaseMotion, meta=(UIMin="0", ForceUnits="rad/s"))
+	float MaxAngularSpeed = 8.f;
+
+	/** A frame that moves the base further than this is a teleport, not travel, and is discarded */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=BaseMotion, meta=(UIMin="0", ForceUnits="cm"))
+	float TeleportDistance = 500.f;
+};
+
+/** Carried across frames by URagdollStatics::CalculateBaseMotion */
+USTRUCT(BlueprintType)
+struct PHYSICALRAGDOLL_API FRagdollBaseMotionState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion, meta=(ForceUnits="cm/s"))
+	FVector LinearVelocity = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion, meta=(ForceUnits="rad/s"))
+	FVector AngularVelocity = FVector::ZeroVector;
+
+	/** Velocity of the base at the character. Only its rate of change reaches the body. */
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion, meta=(ForceUnits="cm/s"))
+	FVector PointVelocity = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion, meta=(ForceUnits="cm/s2"))
+	FVector PointAcceleration = FVector::ZeroVector;
+
+	/** Slope under the character, pointing downhill. @see URagdollStatics::CalculateBaseTilt */
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion, meta=(ForceUnits="cm/s2"))
+	FVector TiltAcceleration = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion, meta=(ForceUnits="deg"))
+	float TiltAngle = 0.f;
+
+	bool bHasPreviousPointVelocity = false;
+
+	/** What the motion was measured from, for confirming the drive found what you expected */
+	UPROPERTY(BlueprintReadOnly, Category=BaseMotion)
+	TWeakObjectPtr<UPrimitiveComponent> ResolvedBase = nullptr;
+
+	FTransform PreviousTransform = FTransform::Identity;
+
+	bool bHasPreviousTransform = false;
+
+	void ClearHistory()
+	{
+		PreviousTransform = FTransform::Identity;
+		bHasPreviousTransform = false;
+		bHasPreviousPointVelocity = false;
+	}
+};
+
+/**
  * Drives the physical layer from whatever the character is standing on, so a body riding a moving
  * surface reacts to it. A rocking ship deck is the case this exists for: the deck rolls, and the body
  * on it should sway against that roll rather than stand welded to the boards.
@@ -573,33 +804,113 @@ struct PHYSICALRAGDOLL_API FRagdollBaseDrive
 {
 	GENERATED_BODY()
 
-	/** How much the base's motion under the character leans the body */
+	/**
+	 * How much the base moving under the character shoves the body. Raise it for a deck that lurches.
+	 *
+	 * Scales the base's acceleration at the character, applied as a bias.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="3"))
 	float TranslationScale = 1.f;
 
-	/** How much the base's rotation rolls the body */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="3"))
+	/**
+	 * How much the base turning under the character twists the body.
+	 *
+	 * rad/s of base roll to rad/s2 of torque. A deck peaks near 0.15 rad/s, so useful values are tens.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="50"))
 	float RotationScale = 1.f;
 
 	/**
-	 * Whether the base's vertical motion counts.
-	 * A ship's heave is often better ignored, since a body riding it up and down reads as bobbing rather
-	 * than as bracing.
+	 * How much a sloped base pushes the body downhill. This is the term that carries a steady list.
+	 *
+	 * Scales the slope, already in cm/s2: a 10 degree list is about 170.
 	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="3"))
+	float TiltScale = 1.f;
+
+	/**
+	 * Tilt at which the whole drive reaches full effect. Raise it to keep a nearly level base off the body.
+	 *
+	 * Everything below it scales down with the slope. Zero gives full effect at any tilt.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="45", ForceUnits="deg"))
+	float TiltRange = 12.f;
+
+	/** Tilt past this stops counting, so a base that rolls right over cannot throw the body */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="90", ForceUnits="deg"))
+	float MaxTiltAngle = 30.f;
+
+	/**
+	 * How far the body leans uphill on a sloped base, keeping its weight over its feet.
+	 *
+	 * Degrees of body per degree of base. This is a static posture, unlike SwayScale.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Base|Lean", meta=(UIMin="0", UIMax="2"))
+	float TiltLeanScale = 0.f;
+
+	/**
+	 * How much a rocking base throws the body off balance. This is the main knob for feeling the deck move.
+	 *
+	 * The fraction of the base's rotation the body fails to follow: 0 rides it welded, 1 is left standing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Base|Lean", meta=(UIMin="0", UIMax="1"))
+	float SwayScale = 0.f;
+
+	/**
+	 * How steady the character looks on his feet. Lower it to make him struggle with the deck.
+	 *
+	 * The recovery spring's frequency in Hz: low is still catching up when the deck rolls back the other way.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Base|Lean", meta=(UIMin="0.1", UIMax="4", ClampMin="0.01", ForceUnits="Hz"))
+	float BalanceFrequency = 1.f;
+
+	/** Below 1 he overcorrects and settles rather than gliding to the deck's angle. 1 is critical damping. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Base|Lean", meta=(UIMin="0", UIMax="2"))
+	float BalanceDampingRatio = 0.6f;
+
+	/** Ceiling on the combined tilt lean and sway, so nothing can bend the body double */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Base|Lean", meta=(UIMin="0", UIMax="45", ForceUnits="deg"))
+	float MaxLeanAngle = 20.f;
+
+	/**
+	 * Extra smoothing on the lean. Lower it if the lean jitters, though the sway spring already smooths.
+	 *
+	 * Separate from InterpRate, which trails the forces. Zero applies the lean with no smoothing at all.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Base|Lean", meta=(UIMin="0", UIMax="30"))
+	float LeanInterpRate = 6.f;
+
+	/** Clear it to let a base heaving up and down push the body. Usually reads as bobbing rather than bracing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base)
 	bool bIgnoreVerticalTranslation = true;
 
-	/** Ceiling on the translation bias */
+	/** Ceiling on the translation and tilt bias together, so one violent frame cannot throw the body */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", ForceUnits="cm/s2"))
 	float MaxBias = 2000.f;
 
-	/** Ceiling on the rotation torque */
+	/** Ceiling on the rotation torque. Raise it if a stiff drive is cancelling the base's twist entirely. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0"))
 	float MaxTorque = 30.f;
 
-	/** How fast the response follows the base. Low trails it, which is usually what a heavy deck wants. */
+	/** How fast the forces follow the base. Low trails it, which is usually what a heavy deck wants. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="30"))
 	float InterpRate = 6.f;
+
+	/** Bone the response is scoped to. Lower down the spine puts more of the body into it; None reads as a shake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base)
+	FName BiasBone = "spine_03";
+
+	/** Lever arm above the centre of mass. @see URagdollComponent::AddPhysicalBias */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(ForceUnits="cm"))
+	float BiasHeightOffset = 20.f;
+
+	/**
+	 * How quickly the base takes the body back once the player stops moving. Lower means a longer handover.
+	 *
+	 * Input takes the layer instantly; only the release is interpolated.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Base, meta=(UIMin="0", UIMax="10"))
+	float InputReleaseRate = 1.5f;
 };
 
 /** Carried by the caller across frames. @see URagdollStatics::CalculateBaseDrive */
@@ -616,9 +927,56 @@ struct PHYSICALRAGDOLL_API FRagdollBaseDriveState
 	UPROPERTY(BlueprintReadWrite, Category=Base)
 	FVector Torque = FVector::ZeroVector;
 
+	/** Feed to URagdollComponent::SetPhysicalLean */
+	UPROPERTY(BlueprintReadWrite, Category=Base)
+	FRotator Lean = FRotator::ZeroRotator;
+
+	/** World-space rotation vector the body is currently off balance by, and how fast it is recovering */
+	UPROPERTY(BlueprintReadWrite, Category=Base)
+	FVector Sway = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadWrite, Category=Base)
+	FVector SwayVelocity = FVector::ZeroVector;
+
+	/** Slope of the base under the character in cm/s2, pointing downhill, before TiltScale */
+	UPROPERTY(BlueprintReadOnly, Category="Base|Debug", meta=(ForceUnits="cm/s2"))
+	FVector TiltAcceleration = FVector::ZeroVector;
+
+	/** How far the base is tilted from level, for reading off what the tilt term is working with */
+	UPROPERTY(BlueprintReadOnly, Category="Base|Debug", meta=(ForceUnits="deg"))
+	float TiltAngle = 0.f;
+
 	/** Base the drive resolved to this frame, for confirming the fallback found what you expected */
 	UPROPERTY(BlueprintReadOnly, Category="Base|Debug")
 	TWeakObjectPtr<UPrimitiveComponent> ResolvedBase = nullptr;
+};
+
+/** A one-off kick decaying over a half life: a wave slamming the deck, a shove, a blast */
+USTRUCT(BlueprintType)
+struct PHYSICALRAGDOLL_API FRagdollImpulseState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category=Impulse, meta=(ForceUnits="cm/s2"))
+	FVector Bias = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category=Impulse)
+	FVector Torque = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category=Impulse, meta=(ForceUnits="s"))
+	float HalfLife = 0.f;
+
+	bool IsActive() const
+	{
+		return Bias.SizeSquared() > 1.f || Torque.SizeSquared() > UE_KINDA_SMALL_NUMBER;
+	}
+
+	void Reset()
+	{
+		Bias = FVector::ZeroVector;
+		Torque = FVector::ZeroVector;
+		HalfLife = 0.f;
+	}
 };
 
 /**
@@ -760,7 +1118,7 @@ struct PHYSICALRAGDOLL_API FRagdollRecoverySettings
 
 	/** Duration of recovery when no montage is available */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Recovery, meta=(UIMin="0", ForceUnits="s"))
-	float FallbackDuration = 2.f;
+	float FallbackDuration = 1.f;
 
 	/** Optional curve controlling the recovery blend alpha, evaluated at normalized time. Takes priority over MontageCurveName. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Recovery)

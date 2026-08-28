@@ -2,6 +2,8 @@
 
 #include "RagdollComponent.h"
 
+#include "RagdollAssets.h"
+
 #include "PhysicalRagdoll.h"
 #include "PhysicalRagdollTags.h"
 #include "RagdollStatics.h"
@@ -133,10 +135,10 @@ URagdollComponent::URagdollComponent(const FObjectInitializer& ObjectInitializer
 		FRagdollBoneGroup& Bone = Profile.BoneGroups.Add_GetRef(FRagdollBoneGroup(TEXT("spine_01")));
 		Bone.BlendWeight = 0.6f;
 		Bone.ControlType = EPhysicsControlType::WorldSpace;
-		Bone.ControlData.AngularStrength = 3.2f;
-		Bone.ControlData.AngularDampingRatio = 0.25f;
-		Bone.ControlData.LinearStrength = 0.36f;
-		Bone.ControlData.LinearDampingRatio = 1.1f;
+		Bone.AngularStiffness = 404.f;
+		Bone.AngularDamping = 10.f;
+		Bone.LinearStiffness = 5.f;
+		Bone.LinearDamping = 5.f;
 	
 		Profile.BoneOverrides.Add(FRagdollBoneOverride(TEXT("spine_05"), true, false, 0.35f));
 		Profile.BoneOverrides.Add(FRagdollBoneOverride(TEXT("neck_01"), true, false, 0.2f));
@@ -434,6 +436,25 @@ void URagdollComponent::SetPhysicalProfile(FGameplayTag ProfileTag)
 		return;
 	}
 
+	if (PhysicalProfileSource == ERagdollTuningSource::Asset)
+	{
+		const TObjectPtr<URagdollProfileAsset>* Asset = PhysicalProfileAssets.Find(ProfileTag);
+		URagdollProfileAsset* ProfileAsset = Asset ? *Asset : nullptr;
+		if (!ProfileAsset)
+		{
+			UE_LOG(LogPhysicalRagdoll, Warning, TEXT("%s has no physical profile asset for '%s'"),
+				*GetNameSafe(GetOwner()), *ProfileTag.ToString());
+			return;
+		}
+
+		ActiveProfileAsset = ProfileAsset;
+		ActiveProfileRevision = ProfileAsset->GetRevision();
+		SetupPhysical(ProfileTag, ProfileAsset->Profile);
+		return;
+	}
+
+	ActiveProfileAsset = nullptr;
+
 	const FRagdollPhysicalProfile* Profile = PhysicalProfiles.Find(ProfileTag);
 	if (!Profile)
 	{
@@ -450,6 +471,19 @@ void URagdollComponent::SetPhysicalProfile(FGameplayTag ProfileTag)
 	}
 
 	SetupPhysical(ProfileTag, *Profile);
+}
+
+void URagdollComponent::RefreshProfileFromAsset()
+{
+	URagdollProfileAsset* Asset = ActiveProfileAsset.Get();
+	if (!Asset || Asset->GetRevision() == ActiveProfileRevision)
+	{
+		return;
+	}
+
+	// The drives are built once, so an edited spring only reaches the solver by building them again
+	ActiveProfileRevision = Asset->GetRevision();
+	SetupPhysical(ActiveProfileTag, Asset->Profile);
 }
 
 void URagdollComponent::SetPhysicalProfileWithSettings(FGameplayTag ProfileTag, const FRagdollPhysicalProfile& Profile)
@@ -796,7 +830,24 @@ void URagdollComponent::DebugDumpBodies() const
 		FPhysicsControlData ControlData;
 		const bool bHasControl = PhysicsControl && PhysicsControl->GetControlData(OperatorName, ControlData);
 
-		UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: %s sim=%d weight=%.3f shapeCollision=%d control=%d enabled=%d angular=%.2f linear=%.2f"),
+		/**
+		 * Deviation from the pose the motors are supposed to be holding, read from the same buffer the
+		 * control component takes its targets from. Small means the motors are working, large and steady
+		 * means they are not reaching the bodies at all, and large and changing means they are unstable.
+		 */
+		float ErrorDegrees = -1.f;
+		float SpinRate = 0.f;
+		const int32 BoneIndex = Mesh->GetBoneIndex(BoneName);
+		const TArray<FTransform>& Animated = Mesh->GetEditableComponentSpaceTransforms();
+		if (Animated.IsValidIndex(BoneIndex))
+		{
+			const FQuat Target = (Animated[BoneIndex] * Mesh->GetComponentTransform()).GetRotation();
+			const FQuat Current = Body->GetUnrealWorldTransform().GetRotation();
+			ErrorDegrees = FMath::RadiansToDegrees((Target.Inverse() * Current).GetNormalized().GetAngle());
+			SpinRate = Body->GetUnrealWorldAngularVelocityInRadians().Size();
+		}
+
+		UE_LOG(LogPhysicalRagdoll, Display, TEXT("DumpBodies: %s sim=%d weight=%.3f shapeCollision=%d control=%d enabled=%d angular=%.2f linear=%.2f error=%.1fdeg spin=%.2frad/s"),
 			*BoneName.ToString(),
 			Body->IsInstanceSimulatingPhysics() ? 1 : 0,
 			Body->PhysicsBlendWeight,
@@ -804,7 +855,8 @@ void URagdollComponent::DebugDumpBodies() const
 			bHasControl ? 1 : 0,
 			bHasControl && ControlData.bEnabled ? 1 : 0,
 			bHasControl ? ControlData.AngularStrength : 0.f,
-			bHasControl ? ControlData.LinearStrength : 0.f);
+			bHasControl ? ControlData.LinearStrength : 0.f,
+			ErrorDegrees, SpinRate);
 	}
 
 	if (PhysicsControl)
@@ -1041,6 +1093,12 @@ void URagdollComponent::CacheReferences()
 			// its own, so it has to come second within the tick group
 			PhysicsControl->PrimaryComponentTick.AddPrerequisite(this, PrimaryComponentTick);
 		}
+
+		if (Mesh)
+		{
+			// The animated pose is only in the mesh's buffer once it has evaluated
+			PrimaryComponentTick.AddPrerequisite(Mesh, Mesh->PrimaryComponentTick);
+		}
 	}
 }
 
@@ -1082,6 +1140,258 @@ void URagdollComponent::EnsureBodyModifierForBone(FName BoneName) const
 	}
 
 	PhysicsControl->CreateNamedBodyModifier(Name, Mesh, BoneName, GRagdollOperatorSet, ModifierData);
+}
+
+float URagdollComponent::CalculateLoadScale(FName BoneName, float MaxScale) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::CalculateLoadScale);
+
+	const FBodyInstance* Own = Mesh ? Mesh->GetBodyInstance(BoneName) : nullptr;
+	if (!Own)
+	{
+		return 1.f;
+	}
+
+	// Inertia about the joint, so mass out along the chain counts for what it is really worth
+	const FVector Pivot = Mesh->GetBoneLocation(BoneName, EBoneSpaces::WorldSpace);
+
+	// Parallel axis: a body's own spin inertia plus its mass at its distance from the joint. Without the
+	// first term any body whose centre of mass sits on its bone reads as weightless.
+	auto InertiaAbout = [&Pivot](const FBodyInstance* Body) -> double
+	{
+		const FVector Tensor = Body->GetBodyInertiaTensor();
+		const double Spin = (Tensor.X + Tensor.Y + Tensor.Z) / 3.0;
+		return Spin + Body->GetBodyMass() * FVector::DistSquared(Body->GetCOMPosition(), Pivot);
+	};
+
+	double Load = 0.0;
+	URagdollStatics::ForEach(Mesh, BoneName, true, [&Load, &InertiaAbout](const FBodyInstance* Body)
+	{
+		Load += InertiaAbout(Body);
+		return true;
+	});
+
+	const double Self = InertiaAbout(Own);
+	if (Self <= UE_KINDA_SMALL_NUMBER || Load <= Self)
+	{
+		return 1.f;
+	}
+
+	// Strength is a frequency and stiffness its square, so the inertia ratio enters as its root
+	return FMath::Clamp(FMath::Sqrt(static_cast<float>(Load / Self)), 1.f, MaxScale);
+}
+
+FPhysicsControlData URagdollComponent::ResolveGroupSpring(const FRagdollBoneGroup& Group, FName BoneName) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ResolveGroupSpring);
+
+	FPhysicsControlData Data;
+	Data.bUseSkeletalAnimation = Group.bUseSkeletalAnimation;
+	Data.bUseAccelerationDriveMode = Group.bUseAccelerationDriveMode;
+	Data.bDisableCollision = Group.bDisableCollision;
+	Data.MaxForce = Group.LinearMaxForce;
+
+	// World space drives every body against its own target, so nothing hangs off the spring to correct for
+	const float LoadScale = Group.bScaleStrengthByLoad && Group.ControlType == EPhysicsControlType::ParentSpace
+		? CalculateLoadScale(BoneName, Group.MaxLoadScale)
+		: 1.f;
+
+	/**
+	 * Acceleration drive divides the whole spring by the body's own inertia while the joint is holding the
+	 * chain, so stiffness and damping both take the full load, not its root. Scaling only one of them
+	 * changes the damping ratio, which is what leaves a loaded joint ringing.
+	 */
+	const float Load = FMath::Square(LoadScale);
+
+	float Stiffness = Group.AngularStiffness * Load;
+	float Damping = Group.AngularDamping * Load;
+	Data.MaxTorque = Group.AngularMaxTorque;
+
+	// Past a fraction of the physics rate the drive overcorrects every step and rings instead of holding
+	if (Group.MaxDriveFrequency > 0.f)
+	{
+		Stiffness = FMath::Min(Stiffness, FMath::Square(Group.MaxDriveFrequency * UE_TWO_PI));
+	}
+
+	/**
+	 * Both paths take a strength and a ratio, so the spring goes back through them rather than arriving as
+	 * extra damping. The layer strength multiplies the strength alone, and a spring scaled that way only
+	 * stays at the same damping ratio while the damping is expressed as one: put in as extra damping it
+	 * would stay put while the stiffness moved, and the body would go sluggish every time the layer eased
+	 * off.
+	 */
+	const float Frequency = FMath::Sqrt(Stiffness);
+
+	Data.AngularStrength = Frequency / UE_TWO_PI;
+	Data.AngularDampingRatio = Frequency > UE_KINDA_SMALL_NUMBER ? Damping / (2.f * Frequency) : 0.f;
+	Data.AngularExtraDamping = 0.f;
+
+	const float LinearStiffness = Group.LinearStiffness * Load;
+	const float LinearFrequency = FMath::Sqrt(LinearStiffness);
+
+	Data.LinearStrength = LinearFrequency / UE_TWO_PI;
+	Data.LinearDampingRatio = LinearFrequency > UE_KINDA_SMALL_NUMBER
+		? Group.LinearDamping * Load / (2.f * LinearFrequency)
+		: 0.f;
+	Data.LinearExtraDamping = 0.f;
+
+	return Data;
+}
+
+void URagdollComponent::SetupJointDriveForBone(FName BoneName, const FPhysicsControlData& ControlData)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetupJointDriveForBone);
+
+	const int32 Index = Mesh ? Mesh->FindConstraintIndex(BoneName) : INDEX_NONE;
+	FConstraintInstance* Constraint = Index != INDEX_NONE ? Mesh->GetConstraintInstanceByIndex(static_cast<uint32>(Index)) : nullptr;
+	if (!Constraint)
+	{
+		return;
+	}
+
+	/**
+	 * The damping ratio takes the load scale as well as the strength does. Acceleration drive normalises
+	 * by the body's own inertia while the joint is carrying the whole chain, which divides the ratio by
+	 * the same load the strength multiplies in, so a critically damped number arrives badly under-damped
+	 * and the joint rings however high the damping is set.
+	 */
+	float Spring, Damping;
+	UE::PhysicsControl::ConvertStrengthToSpringParams(Spring, Damping,
+		ControlData.AngularStrength, ControlData.AngularDampingRatio, ControlData.AngularExtraDamping);
+
+	/**
+	 * Chaos discards the SLERP drive on any joint with a locked angular axis and looks for the twist and
+	 * swing drives instead, so a joint left on SLERP alone ends up with no drive at all and hangs loose
+	 * inside its limits however high the strength is set.
+	 */
+	const bool bLockedAxis = Constraint->GetAngularTwistMotion() == ACM_Locked
+		|| Constraint->GetAngularSwing1Motion() == ACM_Locked
+		|| Constraint->GetAngularSwing2Motion() == ACM_Locked;
+
+	Constraint->SetAngularDriveMode(bLockedAxis ? EAngularDriveMode::TwistAndSwing : EAngularDriveMode::SLERP);
+	Constraint->SetAngularDriveAccelerationMode(ControlData.bUseAccelerationDriveMode);
+	Constraint->SetAngularDriveParams(Spring, Damping, ControlData.MaxTorque);
+	Constraint->SetOrientationDriveSLERP(true);
+	Constraint->SetAngularVelocityDriveSLERP(true);
+	Constraint->SetOrientationDriveTwistAndSwing(true, true);
+	Constraint->SetAngularVelocityDriveTwistAndSwing(true, true);
+
+	JointDriveParams.Add(BoneName, FVector(Spring, Damping, ControlData.MaxTorque));
+}
+
+void URagdollComponent::ApplyJointDriveStrength(float Multiplier)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ApplyJointDriveStrength);
+
+	if (JointDriveParams.IsEmpty() || !Mesh || FMath::IsNearlyEqual(AppliedJointDriveStrength, Multiplier))
+	{
+		return;
+	}
+
+	AppliedJointDriveStrength = Multiplier;
+
+	for (const TPair<FName, FVector>& Pair : JointDriveParams)
+	{
+		const int32 Index = Mesh->FindConstraintIndex(Pair.Key);
+		FConstraintInstance* Constraint = Index != INDEX_NONE ? Mesh->GetConstraintInstanceByIndex(static_cast<uint32>(Index)) : nullptr;
+		if (!Constraint)
+		{
+			continue;
+		}
+
+		// Strength is a frequency, so stiffness takes its square where damping takes it once
+		Constraint->SetAngularDriveParams(Pair.Value.X * FMath::Square(Multiplier),
+			Pair.Value.Y * Multiplier, Pair.Value.Z);
+	}
+}
+
+void URagdollComponent::SetBodyIterationCounts(FBodyInstance* Body, int32 Position, int32 Velocity)
+{
+	// The flag that makes the per-body counts count at all has no setter, only a UPROPERTY
+	static const FBoolProperty* OverrideProperty = CastField<FBoolProperty>(
+		FBodyInstance::StaticStruct()->FindPropertyByName(TEXT("bOverrideIterationCounts")));
+
+	if (!Body || !OverrideProperty)
+	{
+		return;
+	}
+
+	OverrideProperty->SetPropertyValue_InContainer(Body, Position >= 0 || Velocity >= 0);
+
+	Body->SetPositionSolverIterationCount(static_cast<uint8>(FMath::Max(Position, 0)));
+	Body->SetVelocitySolverIterationCount(static_cast<uint8>(FMath::Max(Velocity, 0)));
+}
+
+void URagdollComponent::RestoreBodyIterationCounts()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::RestoreBodyIterationCounts);
+
+	for (const TPair<FName, FIntPoint>& Pair : RestoreIterationCounts)
+	{
+		SetBodyIterationCounts(Mesh ? Mesh->GetBodyInstance(Pair.Key) : nullptr, Pair.Value.X, Pair.Value.Y);
+	}
+
+	RestoreIterationCounts.Reset();
+}
+
+void URagdollComponent::UpdateJointDriveVelocities(float DeltaTime)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::UpdateJointDriveVelocities);
+
+	if (DrivenJoints.IsEmpty() || DeltaTime <= 0.f || !Mesh)
+	{
+		return;
+	}
+
+	const TArrayView<const FTransform> LocalPose = Mesh->GetBoneSpaceTransformsView();
+
+	for (const FName& BoneName : DrivenJoints)
+	{
+		const int32 BoneIndex = Mesh->GetBoneIndex(BoneName);
+		if (!LocalPose.IsValidIndex(BoneIndex))
+		{
+			continue;
+		}
+
+		const FQuat Target = LocalPose[BoneIndex].GetRotation();
+
+		FQuat* Previous = PreviousJointTargets.Find(BoneName);
+		if (!Previous)
+		{
+			PreviousJointTargets.Add(BoneName, Target);
+			continue;
+		}
+
+		const int32 Index = Mesh->FindConstraintIndex(BoneName);
+		if (FConstraintInstance* Constraint = Index != INDEX_NONE ? Mesh->GetConstraintInstanceByIndex(static_cast<uint32>(Index)) : nullptr)
+		{
+			const FQuat Delta = (Target * Previous->Inverse()).GetShortestArcWith(FQuat::Identity);
+
+			// The velocity target shares the orientation target's frame, so it is carried into it the same way
+			const FQuat JointFrame = Constraint->GetRefFrame(EConstraintFrame::Frame2).GetRotation();
+			const FQuat Local = JointFrame.Inverse() * Delta * JointFrame;
+
+			// Capped, since one fast frame of animation would otherwise arrive as a kick
+			const FVector Velocity = Local.ToRotationVector() / (DeltaTime * UE_TWO_PI);
+
+			Constraint->SetAngularVelocityTarget(Velocity.GetClampedToMaxSize(MaxJointDriveVelocity));
+		}
+
+		*Previous = Target;
+	}
+}
+
+void URagdollComponent::ClearJointDriveForBone(FName BoneName) const
+{
+	const int32 Index = Mesh ? Mesh->FindConstraintIndex(BoneName) : INDEX_NONE;
+	FConstraintInstance* Constraint = Index != INDEX_NONE ? Mesh->GetConstraintInstanceByIndex(static_cast<uint32>(Index)) : nullptr;
+	if (!Constraint)
+	{
+		return;
+	}
+
+	// Reinitialised from the asset, since zeroing the params would throw away any drives it authored
+	Mesh->SetConstraintProfile(BoneName, NAME_None, true);
 }
 
 void URagdollComponent::CreateDriveForBone(FName BoneName, const FPhysicsControlData& ControlData,
@@ -1166,10 +1476,13 @@ void URagdollComponent::ApplyBoneWeight(FName BoneName, float Weight) const
 {
 	const FName Name = MakeOperatorName(BoneName);
 
-	// Default rather than Kinematic at zero: a kinematic modifier drives the body to a cached target,
-	// which is work animation is already doing
-	PhysicsControl->SetBodyModifierMovementType(Name,
-		Weight > 0.f ? EPhysicsMovementType::Simulated : EPhysicsMovementType::Default, true, false);
+	/**
+	 * Always Default, which the control component reads as "leave this body alone". Asking it for
+	 * Simulated makes it call SetInstanceSimulatePhysics every tick, which re-asserts the particle's
+	 * state and wakes it, so the bodies never settle and carry a permanent tremor. SetBlendWeight below
+	 * owns whether the body simulates, and only touches it when that actually changes.
+	 */
+	PhysicsControl->SetBodyModifierMovementType(Name, EPhysicsMovementType::Default, true, false);
 	PhysicsControl->SetBodyModifierPhysicsBlendWeight(Name, Weight, true, false);
 
 	// The control component applies its modifiers on its own tick and never does the mesh level
@@ -1232,6 +1545,8 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 	ActiveProfile = Profile;
 
 	EnsurePhysicsCollision();
+	RuntimeBoneOverrides.Reset();
+	GatherRuntimeBoneOverrides(RuntimeBoneOverrides);
 	ResolveBoneOverrides();
 
 	// The drive definition changes wholesale, so start from nothing rather than reconcile it. Modifiers
@@ -1241,11 +1556,41 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 		PhysicsControl->DestroyControlsInSet(GRagdollOperatorSet);
 	}
 
+	LeanedBones.Reset();
+	PendingLeanBones.Reset();
+
+	for (const FName& JointName : DrivenJoints)
+	{
+		ClearJointDriveForBone(JointName);
+	}
+	DrivenJoints.Reset();
+	PreviousJointTargets.Reset();
+	JointDriveParams.Reset();
+	AppliedJointDriveStrength = -1.f;
+	HeldLeans.Reset();
+	RestoreBodyIterationCounts();
+
+	// The engine writes the joint targets from the animated pose, which is the whole point of driving them
+	if (!bRestoreUpdateJointsFromAnimation)
+	{
+		bool bWantsJointDrives = false;
+		for (const FRagdollBoneGroup& Group : ActiveProfile.BoneGroups)
+		{
+			bWantsJointDrives |= Group.bUseJointDrives;
+		}
+
+		if (bWantsJointDrives && !Mesh->bUpdateJointsFromAnimation)
+		{
+			Mesh->bUpdateJointsFromAnimation = true;
+			bRestoreUpdateJointsFromAnimation = true;
+		}
+	}
+
 	for (const FRagdollBoneGroup& Group : ActiveProfile.BoneGroups)
 	{
 		WarnIfGroupUnanchored(Group);
 
-		URagdollStatics::ForEach(Mesh, Group.RootBone, Group.bIncludeRootBone, [this, &Group](const FBodyInstance* BI)
+		URagdollStatics::ForEach(Mesh, Group.RootBone, Group.bIncludeRootBone, [this, &Group](FBodyInstance* BI)
 		{
 			const FName BoneName = URagdollStatics::GetBoneName(Mesh, BI);
 
@@ -1256,7 +1601,34 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 				return true;
 			}
 
-			CreateDriveForBone(BoneName, Group.ControlData, Group.ControlType, Group.ControlDataConstraintProfile);
+			// Chaos rebuilds a body's particle when it starts simulating, which would leave the control's
+			// constraint holding a dead one, so the body has to be dynamic before the control is made
+			if (!BI->IsInstanceSimulatingPhysics())
+			{
+				BI->SetInstanceSimulatePhysics(true, true, true);
+			}
+
+			if (Group.PositionSolverIterations > 0 || Group.VelocitySolverIterations > 0)
+			{
+				// Negative means the body was on the scene default, which is what it has to go back to
+				RestoreIterationCounts.FindOrAdd(BoneName,
+					FIntPoint(BI->GetPositionSolverIterationCount(), BI->GetVelocitySolverIterationCount()));
+
+				SetBodyIterationCounts(BI, Group.PositionSolverIterations, Group.VelocitySolverIterations);
+			}
+
+			const FPhysicsControlData Spring = ResolveGroupSpring(Group, BoneName);
+
+			// A joint drive holds a body against its parent, so it cannot serve a group asking for world space
+			if (Group.bUseJointDrives && Group.ControlType == EPhysicsControlType::ParentSpace)
+			{
+				EnsureBodyModifierForBone(BoneName);
+				SetupJointDriveForBone(BoneName, Spring);
+				DrivenJoints.Add(BoneName);
+				return true;
+			}
+
+			CreateDriveForBone(BoneName, Spring, Group.ControlType, Group.ControlDataConstraintProfile);
 			return true;
 		});
 	}
@@ -1272,6 +1644,7 @@ void URagdollComponent::SetupPhysical(FGameplayTag ProfileTag, const FRagdollPhy
 	// The controls above were created at full strength, so the running value has to land on them before
 	// the control component's tick sees them
 	ApplyStrengthMultiplier(CurrentStrength);
+	ApplyJointDriveStrength(CurrentStrength);
 
 	if (CurrentState != ERagdollState::Physical)
 	{
@@ -1292,12 +1665,33 @@ void URagdollComponent::TeardownPhysical()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::TeardownPhysical);
 
+	LeanedBones.Reset();
+	PendingLeanBones.Reset();
+
+	for (const FName& JointName : DrivenJoints)
+	{
+		ClearJointDriveForBone(JointName);
+	}
+	DrivenJoints.Reset();
+	PreviousJointTargets.Reset();
+	JointDriveParams.Reset();
+	AppliedJointDriveStrength = -1.f;
+	HeldLeans.Reset();
+	RestoreBodyIterationCounts();
+
+	if (Mesh && bRestoreUpdateJointsFromAnimation)
+	{
+		bRestoreUpdateJointsFromAnimation = false;
+		Mesh->bUpdateJointsFromAnimation = false;
+	}
+
 	if (Mesh)
 	{
 		for (const TPair<FName, float>& Pair : BoneWeights)
 		{
 			URagdollStatics::SetBlendWeight(Mesh, Pair.Key, 0.f);
 		}
+
 		URagdollStatics::FinalizeMeshPhysics(Mesh);
 	}
 
@@ -1315,11 +1709,11 @@ void URagdollComponent::ResolveBoneOverrides()
 
 	ResolvedBoneOverrides.Reset();
 
-	for (const FRagdollBoneOverride& Override : ActiveProfile.BoneOverrides)
+	auto Resolve = [this](const FRagdollBoneOverride& Override)
 	{
 		if (Override.BoneName == NAME_None || (!Override.bDisablePhysics && FMath::IsNearlyEqual(Override.BlendWeightScalar, 1.f)))
 		{
-			continue;
+			return;
 		}
 
 		URagdollStatics::ForEach(Mesh, Override.BoneName, Override.bIncludeSelf, [this, &Override](const FBodyInstance* BI)
@@ -1332,6 +1726,41 @@ void URagdollComponent::ResolveBoneOverrides()
 			Resolved.BlendWeightScalar = FMath::Min(Resolved.BlendWeightScalar, Override.BlendWeightScalar);
 			return true;
 		});
+	};
+
+	for (const FRagdollBoneOverride& Override : ActiveProfile.BoneOverrides)
+	{
+		Resolve(Override);
+	}
+
+	for (const FRagdollRuntimeBoneOverride& Runtime : RuntimeBoneOverrides)
+	{
+		if (!Runtime.ProfileTag.IsValid() || Runtime.ProfileTag == ActiveProfileTag)
+		{
+			Resolve(Runtime.Override);
+		}
+	}
+}
+
+void URagdollComponent::RefreshBoneOverrides()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::RefreshBoneOverrides);
+
+	TArray<FRagdollRuntimeBoneOverride> Gathered;
+	GatherRuntimeBoneOverrides(Gathered);
+
+	if (Gathered == RuntimeBoneOverrides)
+	{
+		return;
+	}
+
+	RuntimeBoneOverrides = MoveTemp(Gathered);
+
+	// A bone the overrides just dropped has no control to disable, so the drives are built again rather
+	// than reconciled. The bone weights blend, so the change still arrives as a fade.
+	if (CurrentState == ERagdollState::Physical && ActiveProfileTag.IsValid())
+	{
+		SetupPhysical(ActiveProfileTag, ActiveProfile);
 	}
 }
 
@@ -1494,6 +1923,160 @@ void URagdollComponent::AddPhysicalTorque(FVector Torque, FName BoneName)
 	}
 }
 
+void URagdollComponent::SetPhysicalLean(FRotator Lean, FName BoneName)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::SetPhysicalLean);
+
+	if (!IsRagdollRunnable() || CurrentState != ERagdollState::Physical || !Mesh || !PhysicsControl)
+	{
+		return;
+	}
+
+	const bool bJointDriven = DrivenJoints.Contains(BoneName);
+
+	// Nothing to offset unless the active profile drives this bone
+	if (BoneName == NAME_None || (!bJointDriven && !PhysicsControl->GetControlExists(MakeOperatorName(BoneName))))
+	{
+		return;
+	}
+
+	LastBiasFrame = GFrameCounter;
+	PendingLeanBones.Add(BoneName);
+
+	const FQuat World = Lean.Quaternion();
+
+	// Only when the lean actually moves, so holding one steady lets the bodies settle
+	const FQuat* Held = HeldLeans.Find(BoneName);
+	const bool bLeanChanged = !Held || !Held->Equals(World, 1.e-4f);
+	HeldLeans.Add(BoneName, World);
+
+	// A driven joint is offset from the tick, which is ordered after the animation writes its target
+	if (!bJointDriven)
+	{
+		// A control target lives in the bone's own frame, so the world lean is conjugated into it
+		const FQuat BoneWorld = Mesh->GetBoneQuaternion(BoneName, EBoneSpaces::WorldSpace);
+		PhysicsControl->SetControlTargetOrientation(MakeOperatorName(BoneName),
+			(BoneWorld.Inverse() * World * BoneWorld).Rotator(), 0.f, true, false, true, false);
+	}
+
+	if (bLeanChanged)
+	{
+		WakeBodiesBelow(BoneName, true);
+	}
+}
+
+void URagdollComponent::EnforceBodySafety()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::EnforceBodySafety);
+
+	if (!Mesh || BoneWeights.IsEmpty())
+	{
+		return;
+	}
+
+	const TArray<FTransform>& Animated = Mesh->GetEditableComponentSpaceTransforms();
+	const FTransform& ComponentTM = Mesh->GetComponentTransform();
+	const float SeparationSq = FMath::Square(MaxBodySeparation);
+
+	for (const TPair<FName, float>& Pair : BoneWeights)
+	{
+		FBodyInstance* Body = Mesh->GetBodyInstance(Pair.Key);
+		if (!Body || !Body->IsInstanceSimulatingPhysics())
+		{
+			continue;
+		}
+
+		const int32 BoneIndex = Mesh->GetBoneIndex(Pair.Key);
+		if (!Animated.IsValidIndex(BoneIndex))
+		{
+			continue;
+		}
+
+		const FTransform Current = Body->GetUnrealWorldTransform_AssumesLocked();
+		const FTransform Target = Animated[BoneIndex] * ComponentTM;
+
+		// NaN first: once a body carries one, every distance against it compares false and it is never caught
+		const bool bThrown = Current.ContainsNaN()
+			|| (MaxBodySeparation > 0.f && FVector::DistSquared(Current.GetLocation(), Target.GetLocation()) > SeparationSq);
+
+		if (bThrown)
+		{
+			Body->SetBodyTransform(Target, ETeleportType::ResetPhysics);
+			Body->SetLinearVelocity(FVector::ZeroVector, false);
+			Body->SetAngularVelocityInRadians(FVector::ZeroVector, false);
+			continue;
+		}
+
+		if (MaxBodyAngularSpeed > 0.f)
+		{
+			const FVector Spin = Body->GetUnrealWorldAngularVelocityInRadians();
+			const float MaxSpin = FMath::DegreesToRadians(MaxBodyAngularSpeed);
+			if (Spin.SizeSquared() > FMath::Square(MaxSpin))
+			{
+				Body->SetAngularVelocityInRadians(Spin.GetSafeNormal() * MaxSpin, false);
+			}
+		}
+	}
+}
+
+void URagdollComponent::ApplyHeldLeansToJoints()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ApplyHeldLeansToJoints);
+
+	if (HeldLeans.IsEmpty() || !Mesh)
+	{
+		return;
+	}
+
+	for (const TPair<FName, FQuat>& Pair : HeldLeans)
+	{
+		if (!DrivenJoints.Contains(Pair.Key))
+		{
+			continue;
+		}
+
+		const int32 Index = Mesh->FindConstraintIndex(Pair.Key);
+		FConstraintInstance* Constraint = Index != INDEX_NONE ? Mesh->GetConstraintInstanceByIndex(static_cast<uint32>(Index)) : nullptr;
+		if (!Constraint)
+		{
+			continue;
+		}
+
+		/**
+		 * The engine writes this target in the joint's own reference frame, measured against the parent
+		 * body, so a world-space lean only lands where it was asked for once it has been carried through
+		 * both: first into the parent bone it rotates against, then into the joint frame itself.
+		 */
+		const FQuat ParentWorld = Mesh->GetBoneQuaternion(Constraint->ConstraintBone2, EBoneSpaces::WorldSpace);
+		const FQuat JointFrame = Constraint->GetRefFrame(EConstraintFrame::Frame2).GetRotation();
+		const FQuat Offset = JointFrame.Inverse() * (ParentWorld.Inverse() * Pair.Value * ParentWorld) * JointFrame;
+
+		const FQuat Animated = Constraint->ProfileInstance.AngularDrive.OrientationTarget.Quaternion();
+		Constraint->SetAngularOrientationTarget(Offset * Animated);
+	}
+}
+
+void URagdollComponent::ClearPhysicalLean()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RagdollComponent::ClearPhysicalLean);
+
+	if (PhysicsControl)
+	{
+		for (const FName& BoneName : LeanedBones)
+		{
+			if (!DrivenJoints.Contains(BoneName))
+			{
+				PhysicsControl->SetControlTargetOrientation(MakeOperatorName(BoneName), FRotator::ZeroRotator, 0.f,
+					true, false, true, false);
+			}
+		}
+	}
+
+	LeanedBones.Reset();
+	PendingLeanBones.Reset();
+	HeldLeans.Reset();
+}
+
 void URagdollComponent::WakeBodiesBelow(FName BoneName, bool bIncludeSelf) const
 {
 	URagdollStatics::ForEach(Mesh, BoneName, bIncludeSelf, [](FBodyInstance* BI)
@@ -1516,6 +2099,14 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 		SetState(ERagdollState::None);
 		return;
 	}
+
+#if WITH_EDITOR
+	// Tuning an asset mid-play is the point of holding the profile in one, and the drives only take an
+	// edit by being built again, so it happens before anything this frame reads them
+	RefreshProfileFromAsset();
+#endif
+
+	RefreshBoneOverrides();
 
 	LODScale = CalculateLODScale();
 
@@ -1562,6 +2153,10 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 		ApplyBoneWeight(Pair.Key, Current);
 	}
 
+	UpdateJointDriveVelocities(DeltaTime);
+	ApplyHeldLeansToJoints();
+	EnforceBodySafety();
+
 	URagdollStatics::FinalizeMeshPhysics(Mesh);
 
 #if !UE_BUILD_SHIPPING
@@ -1588,6 +2183,26 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 		}
 	}
 
+	for (const FName& BoneName : LeanedBones)
+	{
+		// A driven joint's target is rewritten from the animated pose every frame, so it clears itself
+		if (!PendingLeanBones.Contains(BoneName) && !DrivenJoints.Contains(BoneName))
+		{
+			PhysicsControl->SetControlTargetOrientation(MakeOperatorName(BoneName), FRotator::ZeroRotator, 0.f,
+				true, false, true, false);
+		}
+	}
+	for (auto It = HeldLeans.CreateIterator(); It; ++It)
+	{
+		if (!PendingLeanBones.Contains(It->Key))
+		{
+			It.RemoveCurrent();
+		}
+	}
+
+	LeanedBones = MoveTemp(PendingLeanBones);
+	PendingLeanBones.Reset();
+
 	const float TargetStrength = ActiveProfile.StrengthMultiplier * PhysicalStrength;
 	CurrentStrength = BlendRate > 0.f
 		? FMath::Lerp(CurrentStrength, TargetStrength, BlendAlpha)
@@ -1602,6 +2217,7 @@ void URagdollComponent::TickPhysical(float DeltaTime)
 		bConverged = false;
 	}
 	ApplyStrengthMultiplier(CurrentStrength);
+	ApplyJointDriveStrength(CurrentStrength);
 
 	if (BoneWeights.Num() == 0 && (ActiveProfile.BoneGroups.Num() == 0 || IsPhysicalSuspended()))
 	{

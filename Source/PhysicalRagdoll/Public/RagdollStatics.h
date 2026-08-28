@@ -128,6 +128,28 @@ public:
 		UPrimitiveComponent* BaseComponent, const ACharacter* Character, float DeltaTime,
 		FVector& OutBias, FVector& OutTorque);
 
+	/** Gravity resolved onto the base's plane, pointing downhill, in cm/s2. Zero when the base is level. */
+	UFUNCTION(BlueprintPure, Category=Ragdoll)
+	static FVector CalculateBaseTilt(const UPrimitiveComponent* Base, FVector GravityDirection,
+		float GravityMagnitude, float MaxTiltAngle, float& OutTiltAngle);
+
+	/** World-space pose offset for a body bracing the base: uphill against the slope, and catching its balance against the roll */
+	UFUNCTION(BlueprintCallable, Category=Ragdoll)
+	static FRotator CalculateBaseLean(const FRagdollBaseDrive& Params, UPARAM(ref) FRagdollBaseDriveState& State,
+		float DeltaTime, FVector TiltAcceleration,
+		float TiltAngle, FVector AngularVelocity, FVector GravityDirection);
+
+	/**
+	 * What the base drive read and what it made of it, printed on screen and drawn at Origin.
+	 *
+	 * Yellow is the downhill slope of the base, green the bias that reaches the bodies, and blue the base's
+	 * own up axis drawn from its pivot, which is where a base whose origin is not where you assume shows
+	 * itself. The numbers separate the three terms, so it is obvious which one is worth anything.
+	 */
+	UFUNCTION(BlueprintCallable, Category=Ragdoll, meta=(WorldContext="WorldContextObject"))
+	static void DrawBaseDriveDebug(const UObject* WorldContextObject, const FVector& Origin,
+		const FRagdollBaseDriveState& State, FVector PointAcceleration, FVector AngularVelocity);
+
 	UFUNCTION(BlueprintCallable, Category=Ragdoll)
 	static void CalculateBoneDeltaDrive(const FRagdollBoneDeltaDrive& Params, UPARAM(ref) FRagdollBoneDeltaDriveState& State,
 		const USkeletalMeshComponent* Mesh, float DeltaTime, float& OutAlpha);
